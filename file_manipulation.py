@@ -174,7 +174,91 @@ def tree(path=None, level=0, max_level=2, show_hidden=False, show_dirs_only=Fals
             tree(entry, new_level, max_level, show_hidden, show_dirs_only, show_full_path,
                  pattern, show_permissions, show_sizes)
 
-import re
+def sed(path, pattern, replacement, recursive=False, in_place=False, backup_extension=None, flags=0):
+    """
+    Find and replace text in files.
+    
+    Args:
+        pattern (str): Regex pattern to find.
+        replacement (str): Text to replace matches with.
+        path (str or Path): File, directory, or glob pattern to process.
+        recursive (bool): If True, process directories recursively.
+        in_place (bool): If True, modify the file. If False, print to stdout.
+        backup_extension (str): If provided, create a backup (e.g., '.bak').
+        flags (int): Regex flags.
+        
+    Returns:
+        Union[list, dict]: 
+            If in_place=True: List of Path objects for files that were modified.
+            If in_place=False: Dictionary {Path: str} of files and their potential new content.
+    """
+    path_obj = Path(path)
+    files_to_process = []
+    
+    # Return structures
+    modified_files = [] 
+    preview_results = {}
+
+    # 1. Resolve files
+    if path_obj.is_file():
+        files_to_process = [path_obj]
+    elif path_obj.is_dir():
+        if recursive:
+            files_to_process = [p for p in path_obj.rglob("*") if p.is_file()]
+        else:
+            files_to_process = [p for p in path_obj.glob("*") if p.is_file()]
+    else:
+        files_to_process = list(Path(".").glob(str(path)))
+        if not files_to_process:
+            print(f"sed: {path}: No such file or directory")
+            return [] if in_place else {}
+
+    # 2. Compile Regex
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as e:
+        print(f"sed: Invalid regular expression: {e}")
+        return [] if in_place else {}
+
+    # 3. Process Files
+    for file_path in files_to_process:
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+
+            new_content = regex.sub(replacement, content)
+
+            # Skip if no changes found
+            if content == new_content:
+                continue
+
+            if in_place:
+                # Backup
+                if backup_extension:
+                    backup_path = file_path.with_suffix(file_path.suffix + backup_extension)
+                    shutil.copy2(file_path, backup_path)
+                    print(f"Backup created: {backup_path}")
+
+                # Write
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                print(f"Modified: {file_path}")
+                modified_files.append(file_path)
+            else:
+                # Dry run output
+                print(f"--- Output for {file_path} ---")
+                print(new_content)
+                print(f"--- End of {file_path} ---\n")
+                preview_results[file_path] = new_content
+
+        except PermissionError:
+            print(f"sed: {file_path}: Permission denied")
+        except UnicodeDecodeError:
+            print(f"sed: {file_path}: Binary or unreadable file skipped")
+        except Exception as e:
+            print(f"sed: Error processing {file_path}: {e}")
+            
+    return modified_files if in_place else preview_results
 
 def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True, 
          invert_match=False, count=True, show_filename=True):
@@ -186,18 +270,21 @@ def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True
         path (str or Path): The directory or file to search in.
         recursive (bool): If True, search directories recursively.
         ignore_case (bool): If True, perform case-insensitive matching.
-        line_numbers (bool): If True, include line numbers in console output.
+        line_numbers (bool): If True, include line numbers in output AND return dictionary.
         invert_match (bool): If True, select lines that do NOT match the pattern.
-        count (bool): If True, print only the count of matching lines per file to console.
-        show_filename (bool): If True, prefix the console output with the filename.
+        count (bool): If True, print only the count of matching lines per file.
+        show_filename (bool): If True, prefix the output with the filename.
         
     Returns:
-        list: A list of dicts: [{'file': Path, 'count': int, 'lines': [int, int, ...]}]
+        list: A list of dicts. 
+              Always contains: {'file': Path, 'count': int}
+              Conditionally contains: 'lines': [int, int...] (only if line_numbers=True)
     """
     path_obj = Path(path)
     files_to_search = []
     results = []
 
+    # 1. Resolve files
     if path_obj.is_file():
         files_to_search = [path_obj]
     elif path_obj.is_dir():
@@ -211,6 +298,7 @@ def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True
             print(f"grep: {path}: No such file or directory")
             return []
 
+    # 2. Compile Regex
     flags = re.IGNORECASE if ignore_case else 0
     try:
         regex = re.compile(pattern, flags)
@@ -218,6 +306,7 @@ def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True
         print(f"grep: Invalid regular expression: {e}")
         return []
 
+    # 3. Search Files
     for file_path in files_to_search:
         try:
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -243,13 +332,21 @@ def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True
                             output_parts.append(line_content)
                             print(":".join(output_parts))
                 
+                # If matches were found in this file, add to results
                 if matching_line_numbers:
-                    results.append({
+                    # Base dictionary with always-present keys
+                    file_result = {
                         'file': file_path,
-                        'count': len(matching_line_numbers),
-                        'lines': matching_line_numbers
-                    })
+                        'count': len(matching_line_numbers)
+                    }
                     
+                    # Conditionally add the 'lines' key
+                    if line_numbers:
+                        file_result['lines'] = matching_line_numbers
+                        
+                    results.append(file_result)
+                    
+                    # Console output for 'count' mode
                     if count:
                         print(f"{file_path}:{len(matching_line_numbers)}")
 
@@ -260,7 +357,7 @@ def grep(pattern, path=".", recursive=False, ignore_case=True, line_numbers=True
             
     return results
 
-def find(pattern=None, path=".", file_type=None, absolute_paths=False):
+def find(pattern=None, path=".", file_type=None, absolute_paths=False, max_level=None):
     """
     Find files and directories using glob patterns with Unix-like options.
     
@@ -269,18 +366,31 @@ def find(pattern=None, path=".", file_type=None, absolute_paths=False):
         pattern (str): Glob pattern to match filenames.
         file_type (str): Type of files to find ('f' for files, 'd' for directories).
         absolute_paths (bool): If True, return and print absolute (resolved) paths.
+        max_level (int): Maximum depth to search. 1 = immediate children only.
+                         None = infinite recursion.
     Returns:
         list: List of found items (Path objects; resolved if absolute_paths=True).
     """
     search_path = Path(path)
     glob_pattern = pattern if pattern else "*"
     
-    items = list(search_path.rglob(glob_pattern))
+    # Start with a generator from rglob
+    items = search_path.rglob(glob_pattern)
+
+    # Filter by max_level if specified
+    if max_level is not None:
+        items = (
+            item for item in items 
+            if len(item.relative_to(search_path).parts) <= max_level
+        )
 
     if file_type == 'f':
         items = [item for item in items if item.is_file()]
     elif file_type == 'd':
         items = [item for item in items if item.is_dir()]
+    else:
+        # If no file_type specified, ensure we consume the generator into a list
+        items = list(items)
     
     if absolute_paths:
         items = [item.resolve() for item in items]
@@ -289,7 +399,6 @@ def find(pattern=None, path=".", file_type=None, absolute_paths=False):
         print(item)
         
     return list(items)
-
 
 def rm(path, recursive=False, force=False, verbose=True):
     """
