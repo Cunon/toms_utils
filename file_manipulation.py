@@ -1,9 +1,12 @@
 import os
 import platform
-from pathlib import Path
-import re
-import glob
 import shutil
+import glob
+import re
+import time
+import difflib
+import inspect
+from pathlib import Path
 
 def open_directory(input_dir=None):
     """
@@ -60,40 +63,144 @@ def mkdir(path, parents=False, exist_ok=False, *args, **kwargs):
     """
     Path(path).mkdir(parents=parents, exist_ok=exist_ok, *args, **kwargs)
 
-def ls(pattern="*", show_hidden=False, long_format=False, recursive=False):
+import stat
+import time
+from pathlib import Path
+
+
+def ls(
+    path=".",
+    pattern="*",
+    show_hidden=False,
+    long_format=False,
+    recursive=False,
+    absolute_paths=False,
+    sort="name",           # "name" | "size" | "mtime" | "type"
+    reverse=False,
+    dirs_first=False,
+    human_readable=True,
+):
     """
     List files matching a glob pattern with optional flags.
-    
-    Args:
-        pattern (str): Glob pattern to match files.
-        show_hidden (bool): If True, show hidden files and directories.
-        long_format (bool): If True, display detailed information.
-        recursive (bool): If True, list subdirectories recursively.
-    """
-    def list_items(current_path, level=0):
-        returned_items = None
-        try:
-            items = Path(current_path).glob(pattern)
-            if not show_hidden:
-                items = [item for item in items if not item.name.startswith('.')]
-            
-            for item in sorted(items):
-                if long_format:
-                    stat = item.stat()
-                    print(f"{stat.st_mode} {stat.st_size} {item.name}")
-                else:
-                    print(item.name)
-                
-                if recursive and item.is_dir():
-                    print(f"{item}/")
-                    list_items(str(item) + "/**/*", level + 1)
-            returned_items = list(items)
-        except PermissionError:
-            print(f"Permission denied: {current_path}")
-    
-    returned_items = list_items(".")
-    return returned_items
 
+    Args:
+        path (str | Path): Base directory OR a glob pattern (if it contains wildcards).
+        pattern (str): Glob pattern within `path` directory (ignored if `path` contains wildcards).
+        show_hidden (bool): If True, include dotfiles and files under hidden directories.
+        long_format (bool): If True, print permissions, size, and mtime.
+        recursive (bool): If True, recurse into subdirectories.
+        absolute_paths (bool): If True, print/return resolved absolute paths.
+        sort (str): Sorting key: "name", "size", "mtime", "type".
+        reverse (bool): Reverse sort order.
+        dirs_first (bool): If True, list directories before files.
+        human_readable (bool): If True, show sizes as B/KB/MB/... in long format.
+
+    Returns:
+        list[Path]: Paths in the order printed.
+    """
+    def _has_wildcards(s: str) -> bool:
+        return any(ch in s for ch in ("*", "?", "["))
+
+    def _is_hidden(p: Path, base: Path) -> bool:
+        # Hidden if any path component in the relative path starts with '.'
+        try:
+            rel = p.relative_to(base)
+            parts = rel.parts
+        except Exception:
+            parts = p.parts
+        return any(part.startswith(".") for part in parts)
+
+    def _fmt_size(n: int) -> str:
+        if not human_readable:
+            return str(n)
+        val = float(n)
+        for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+            if val < 1024.0:
+                return f"{val:>7.2f}{unit}"
+            val /= 1024.0
+        return f"{val:>7.2f}EB"
+
+    def _fmt_mtime(ts: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+    path_str = str(path)
+    base = Path(".")
+    items: list[Path] = []
+
+    try:
+        # If `path` itself is a glob, treat it as the full pattern.
+        if _has_wildcards(path_str):
+            candidates = list(base.glob(path_str))
+            base_for_hidden = base
+        else:
+            base = Path(path_str)
+            base_for_hidden = base
+
+            if base.is_file():
+                candidates = [base]
+            elif base.is_dir():
+                candidates = list(base.rglob(pattern)) if recursive else list(base.glob(pattern))
+            else:
+                print(f"ls: {path}: No such file or directory")
+                return []
+
+        for p in candidates:
+            # Skip hidden (including anything under a hidden dir) unless requested
+            if not show_hidden and _is_hidden(p, base_for_hidden):
+                continue
+            items.append(p)
+
+        # Sorting
+        def sort_key(p: Path):
+            try:
+                st = p.stat()
+            except Exception:
+                st = None
+
+            if sort == "size":
+                key = st.st_size if (st and p.is_file()) else -1
+            elif sort == "mtime":
+                key = st.st_mtime if st else 0
+            elif sort == "type":
+                # dirs first if dirs_first else natural; "type" groups dirs/files
+                key = (0 if p.is_dir() else 1, p.name.lower())
+            else:  # "name"
+                key = p.name.lower()
+
+            if dirs_first and sort != "type":
+                return (0 if p.is_dir() else 1, key)
+            return key
+
+        items.sort(key=sort_key, reverse=reverse)
+
+        # Print
+        for p in items:
+            display = p.resolve() if absolute_paths else p
+            if long_format:
+                try:
+                    st = p.stat()
+                    perms = stat.filemode(st.st_mode)
+                    size = _fmt_size(st.st_size) if p.is_file() else " " * 9
+                    mtime = _fmt_mtime(st.st_mtime)
+                except Exception:
+                    perms = "??????????"
+                    size = " " * 9
+                    mtime = "????-??-?? ??:??"
+
+                suffix = "/" if p.is_dir() else ""
+                print(f"{perms} {size} {mtime} {display}{suffix}")
+            else:
+                suffix = "/" if p.is_dir() else ""
+                print(f"{display}{suffix}")
+
+        return items
+
+    except PermissionError:
+        print(f"ls: Permission denied: {path}")
+        return []
+    except Exception as e:
+        print(f"ls error: {e}")
+        return []
 
 def tree(path=None, level=0, max_level=2, show_hidden=False, show_dirs_only=False, show_full_path=False,
          pattern=None, show_permissions=False, show_sizes=True):
@@ -479,3 +586,185 @@ def cp(src, dst, recursive=False):
             shutil.copy2(src_path, dst_path)
     except Exception as e:
         print(f"Error copying {src} to {dst}: {e}")
+
+# ==========================================
+#  NEW Additions
+# ==========================================
+
+def touch(path, exist_ok=True):
+    """
+    Create an empty file or update the timestamp of an existing file.
+    
+    Args:
+        path (str): Path to the file.
+        exist_ok (bool): If True, update timestamp if file exists. 
+                         If False, raise error if file exists.
+    """
+    try:
+        p = Path(path)
+        if p.exists():
+            if exist_ok:
+                current_time = time.time()
+                os.utime(p, (current_time, current_time))
+                print(f"Updated timestamp: {p}")
+            else:
+                print(f"touch: file {p} already exists")
+        else:
+            p.touch()
+            print(f"Created file: {p}")
+    except Exception as e:
+        print(f"touch error: {e}")
+
+def cat(path, show_line_numbers=False):
+    """
+    Print the contents of a file to stdout.
+    
+    Args:
+        path (str): Path to the file.
+        show_line_numbers (bool): Prefix lines with numbers.
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for i, line in enumerate(f, 1):
+                prefix = f"{i:4} | " if show_line_numbers else ""
+                print(f"{prefix}{line}", end='')
+            print() # Ensure newline at end
+    except Exception as e:
+        print(f"cat error: {e}")
+
+def du(path=".", human_readable=True):
+    """
+    Calculate disk usage of a directory recursively.
+    
+    Args:
+        path (str): Directory or file path.
+        human_readable (bool): Return string (e.g. '5 MB') instead of bytes.
+    """
+    path_obj = Path(path)
+    total = 0
+    try:
+        if path_obj.is_file():
+            total = path_obj.stat().st_size
+        else:
+            for item in path_obj.rglob('*'):
+                if item.is_file():
+                    total += item.stat().st_size
+        
+        if human_readable:
+            for unit in ['B', 'KB', 'MB', 'GB']:
+                if total < 1024:
+                    res = f"{total:.2f} {unit}"
+                    print(res)
+                    return res
+                total /= 1024
+            print(f"{total:.2f} TB")
+        else:
+            print(total)
+            return total
+    except Exception as e:
+        print(f"du error: {e}")
+
+def archive(source_path, output_name, format="zip"):
+    """
+    Compress a directory into an archive file.
+    
+    Args:
+        source_path (str): Directory to compress.
+        output_name (str): Output filename (without extension).
+        format (str): 'zip', 'tar', 'gztar', 'bztar', or 'xztar'.
+    """
+    try:
+        shutil.make_archive(output_name, format, source_path)
+        print(f"Archived '{source_path}' -> '{output_name}.{format}'")
+    except Exception as e:
+        print(f"archive error: {e}")
+
+def extract(archive_path, extract_dir="."):
+    """
+    Extract an archive file.
+    
+    Args:
+        archive_path (str): Path to the zip/tar file.
+        extract_dir (str): Directory to extract into.
+    """
+    try:
+        shutil.unpack_archive(archive_path, extract_dir)
+        print(f"Extracted '{archive_path}' -> '{extract_dir}'")
+    except Exception as e:
+        print(f"extract error: {e}")
+
+def diff(file1, file2, context_lines=3):
+    """
+    Compare two files line by line (Unified Diff).
+    
+    Args:
+        file1 (str): Path to first file.
+        file2 (str): Path to second file.
+        context_lines (int): Number of context lines to show around changes.
+    """
+    try:
+        f1 = Path(file1).read_text(encoding='utf-8', errors='ignore').splitlines()
+        f2 = Path(file2).read_text(encoding='utf-8', errors='ignore').splitlines()
+        
+        diff_gen = difflib.unified_diff(
+            f1, f2,
+            fromfile=file1, tofile=file2,
+            lineterm="", n=context_lines
+        )
+        
+        diffs = list(diff_gen)
+        if not diffs:
+            print("Files are identical.")
+        else:
+            for line in diffs:
+                print(line)
+    except Exception as e:
+        print(f"diff error: {e}")
+
+# ==========================================
+#  Help System
+# ==========================================
+
+def manual(command=None):
+    """
+    Show the toolbox manual.
+    
+    Usage:
+        manual()          -> Lists all available commands.
+        manual('grep')    -> Shows detailed help for 'grep'.
+        manual(grep)      -> Same as above.
+    """
+    # Helper to gather all functions defined in this module
+    # We filter out imports and internal variables
+    all_globals = globals().copy()
+    toolbox_funcs = {
+        name: func for name, func in all_globals.items()
+        if inspect.isfunction(func) and func.__module__ == __name__ and name != 'manual'
+    }
+    
+    if command is None:
+        print(f"{'COMMAND':<15} | {'DESCRIPTION'}")
+        print("-" * 60)
+        for name in sorted(toolbox_funcs):
+            func = toolbox_funcs[name]
+            # Get the first line of the docstring
+            doc = inspect.getdoc(func) or "No description."
+            summary = doc.split('\n')[0]
+            print(f"{name:<15} | {summary}")
+        print("-" * 60)
+        print("Type manual('command_name') for details.")
+        
+    else:
+        # Resolve command if it's a string
+        target_func = None
+        if isinstance(command, str):
+            target_func = toolbox_funcs.get(command)
+        elif hasattr(command, '__name__'):
+            target_func = command
+            
+        if target_func:
+            print(f"--- Manual: {target_func.__name__} ---")
+            print(inspect.getdoc(target_func))
+            print("-------------------------------------")
+        else:
+            print(f"Unknown command: {command}")
