@@ -40,6 +40,42 @@ def open_directory(input_dir=None):
         print(f"Error opening directory: {e}")
         return False
 
+def head(path, lines=10):
+    """
+    Print the first N lines of a file.
+    
+    Args:
+        path (str): Path to the file.
+        lines (int): Number of lines to print (default: 10).
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            for i, line in enumerate(f, 1):
+                if i > lines:
+                    break
+                print(line, end='')
+    except Exception as e:
+        print(f"head error: {e}")
+
+def tail(path, lines=10):
+    """
+    Print the last N lines of a file.
+    
+    Args:
+        path (str): Path to the file.
+        lines (int): Number of lines to print (default: 10).
+    """
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            # Read all lines and get the last N
+            all_lines = f.readlines()
+            start_index = max(0, len(all_lines) - lines)
+            for line in all_lines[start_index:]:
+                print(line, end='')
+    except Exception as e:
+        print(f"tail error: {e}")
+
+
 def pwd():
     """
     os.getcwd()
@@ -284,14 +320,14 @@ def tree(path=None, level=0, max_level=2, show_hidden=False, show_dirs_only=Fals
             tree(entry, new_level, max_level, show_hidden, show_dirs_only, show_full_path,
                  pattern, show_permissions, show_sizes)
 
-def sed(path, pattern, replacement, recursive=False, in_place=False, backup_extension=None, flags=0):
+def sed(path, find, replace, recursive=False, in_place=True, backup_extension=None, flags=0):
     """
     Find and replace text in files.
     
     Args:
-        pattern (str): Regex pattern to find.
-        replacement (str): Text to replace matches with.
-        path (str or Path): File, directory, or glob pattern to process.
+        find (str): Regex find to find.
+        replace (str): Text to replace matches with.
+        path (str or Path): File, directory, or glob find to process.
         recursive (bool): If True, process directories recursively.
         in_place (bool): If True, modify the file. If False, print to stdout.
         backup_extension (str): If provided, create a backup (e.g., '.bak').
@@ -325,7 +361,7 @@ def sed(path, pattern, replacement, recursive=False, in_place=False, backup_exte
 
     # 2. Compile Regex
     try:
-        regex = re.compile(pattern, flags)
+        regex = re.compile(find, flags)
     except re.error as e:
         print(f"sed: Invalid regular expression: {e}")
         return [] if in_place else {}
@@ -336,7 +372,7 @@ def sed(path, pattern, replacement, recursive=False, in_place=False, backup_exte
             with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
 
-            new_content = regex.sub(replacement, content)
+            new_content = regex.sub(replace, content)
 
             # Skip if no changes found
             if content == new_content:
@@ -350,7 +386,7 @@ def sed(path, pattern, replacement, recursive=False, in_place=False, backup_exte
                     print(f"Backup created: {backup_path}")
 
                 # Write
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, 'w', encoding='utf-8', newline='') as f:
                     f.write(new_content)
                 print(f"Modified: {file_path}")
                 modified_files.append(file_path)
