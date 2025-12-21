@@ -52,7 +52,7 @@ def cd(path, *args, **kwargs):
     """
     os.chdir(path, *args, **kwargs)
 
-def mkdir(path, parents=False, exist_ok=False, *args, **kwargs):
+def mkdir(path, parents=False, exist_ok=True, *args, **kwargs):
     """
     Path(path).mkdir wrapper
     
@@ -61,7 +61,10 @@ def mkdir(path, parents=False, exist_ok=False, *args, **kwargs):
         parents (bool): If True, create parent directories if they don't exist.
         exist_ok (bool): If True, do not raise an error if the directory already exists.
     """
-    Path(path).mkdir(parents=parents, exist_ok=exist_ok, *args, **kwargs)
+    try:
+        Path(path).mkdir(parents=parents, exist_ok=exist_ok, *args, **kwargs)
+    except Exception as e:
+        print(f"mkdir error: {e}")
 
 import stat
 import time
