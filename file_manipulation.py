@@ -8,6 +8,31 @@ import difflib
 import inspect
 from pathlib import Path
 
+def startfile(path):
+    """
+    Open a file with the default application.
+    
+    Args:
+        path (str or Path): Path to the file to open.
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        filepath = Path(path)
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(filepath)
+        elif system == "Darwin":  # macOS
+            os.system(f'open "{filepath}"')
+        else:  # Linux 
+            os.system(f'xdg-open "{filepath}"')
+        return True
+        
+    except Exception as e:
+        print(f"Error opening file: {e}")
+        return False
+
 def open_directory(input_dir=None):
     """
     Open the parent directory of a file in the default file explorer/browser.
@@ -603,14 +628,15 @@ def mv(src, dst):
     except Exception as e:
         print(f"Error moving {src} to {dst}: {e}")
 
-def cp(src, dst, recursive=False):
+def cp(src, dst, recursive=False, verbose=True):
     """
-    Wrapped for shutil.copy2
+    Wrapper for shutil.copy2
     
     Args:
         src (str or Path): Source path.
         dst (str or Path): Destination path.
         recursive (bool): If True, copy directories recursively.
+        verbose (bool): If True, print status messages.
     """
     try:
         src_path = Path(src)
@@ -619,15 +645,21 @@ def cp(src, dst, recursive=False):
         if src_path.is_dir():
             if recursive:
                 shutil.copytree(src_path, dst_path)
+                if verbose:
+                    print(f"Copied directory: {src} -> {dst}")
             else:
-                print(f"cp: -r not specified; omitting directory '{src}'")
+                if verbose:
+                    print(f"cp: -r not specified; omitting directory '{src}'")
         else:
             shutil.copy2(src_path, dst_path)
+            if verbose:
+                print(f"Copied file: {src} -> {dst}")
     except Exception as e:
-        print(f"Error copying {src} to {dst}: {e}")
-
+        if verbose:
+            print(f"Error copying {src} to {dst}: {e}")
+            
 # ==========================================
-#  NEW Additions
+#  Beta Functions (Not Fully Tested / used less often)
 # ==========================================
 
 def touch(path, exist_ok=True):
