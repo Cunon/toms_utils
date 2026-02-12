@@ -889,7 +889,7 @@ class UnichartNotebook:
                     fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
             self.last_fig = fig
-            fig.show()
+            # fig.show()
             return fig
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
