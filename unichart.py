@@ -313,11 +313,10 @@ def _calculate_regression(df, x_col, y_col, order):
 # -----------------------------------------------------------------------------
 # Main Plotting Functions
 # -----------------------------------------------------------------------------
-
 def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None, marker=None,
             markersize=10, marker_edge_color="black", linestyle=None, hue_palette="Viridis",
             hue_order=None, line=False, suppress_msg=False, return_axes=False, axes=None,
-            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,  # <--- NEW ARGUMENT
+            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None):
     """
@@ -344,7 +343,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         ncols = int(np.ceil(n_y / nrows))
 
     # Initialize subplots
-    # We pass subplot_titles directly. If None (default), no titles are rendered above subplots.
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
 
     # --- LAYOUT SETUP ---
@@ -354,10 +352,10 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         'template': "plotly_dark" if darkmode else "plotly_white",
         'title': {
             'text': final_title,
-            'x': 0.5,             # <--- Center the title
-            'xanchor': 'center'   # <--- Ensure anchor is center
+            'x': 0.5,
+            'xanchor': 'center'
         },
-        'xaxis_title': xlabel if xlabel else x,
+        # 'xaxis_title': xlabel if xlabel else x, # REMOVED: Applied in loop below instead
         'showlegend': True if legend != 'off' else False
     }
 
@@ -373,11 +371,8 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             continue
         df = dataset.df.copy()
         
-        # Sanitize DataFrame: Drop duplicate columns to prevent ambiguity
-        # This handles cases where the original data source had duplicate column names (e.g. 'pressure', 'pressure')
         df = df.loc[:, ~df.columns.duplicated()]
         
-        # Sorting
         if dataset.order == 'index': df = df.sort_index()
         elif dataset.order: df = df.sort_values(by=dataset.order)
         else: df = df.sort_index()
@@ -416,21 +411,15 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 x_col = x
 
             # Custom Data & Hover
-            # Ensure unique columns to prevent DuplicateError in Plotly/Pandas
-            # (e.g. if 'pressure' is in hover_parms AND is the y-axis)
             hover_cols = [p for p in hover_parms if p in df.columns]
-            
-            # Build list of unique columns needed for customdata, preserving order
             custom_data_cols = []
             seen_cols = set()
             
-            # Always include x and y first
             for c in [x_col, yi]:
                 if c not in seen_cols:
                     custom_data_cols.append(c)
                     seen_cols.add(c)
             
-            # Add requested hover params
             for c in hover_cols:
                 if c not in seen_cols:
                     custom_data_cols.append(c)
@@ -438,7 +427,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             
             custom_data = df[custom_data_cols]
             
-            # Helper to get index
             def get_cd_idx(col_name):
                 return custom_data_cols.index(col_name)
 
@@ -447,14 +435,12 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
-            # Mode
             mode_parts = []
             if not cur_linestyle: mode_parts.append('markers')
             else: mode_parts.append('lines')
             if cur_marker: mode_parts.append('markers')
             mode = "+".join(mode_parts)
 
-            # Style Dicts
             marker_dict = dict(
                 size=cur_markersize,
                 symbol=get_plotly_marker(cur_marker),
@@ -463,7 +449,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             )
             line_dict = dict(width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle))
 
-            # Hue Logic
             if cur_hue and cur_hue in df.columns:
                 hue_data = df[cur_hue]
                 if pd.api.types.is_numeric_dtype(hue_data):
@@ -478,37 +463,37 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 marker_dict['color'] = cur_color
                 line_dict['color'] = cur_color
 
-            # Add Trace
             fig.add_trace(go.Scatter(
                 x=df[x_col], y=df[yi], mode=mode,
-                name=f"{cur_idx}: {cur_title} ({yi})",
-                legendgroup=f"group_{cur_idx}",  # <--- CRITICAL FIX: Groups traces by dataset index
+                name=f"{cur_idx}: {cur_title}",
+                legendgroup=f"group_{cur_idx}",
                 marker=marker_dict, line=line_dict,
                 customdata=custom_data, hovertemplate=ht,
                 showlegend=(idx_y == 0)
             ), row=row, col=col)
 
-            # Regression Trace
             if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
                 rx, ry = _calculate_regression(df, x_col, yi, cur_reg_order)
                 fig.add_trace(go.Scatter(
                     x=rx, y=ry, mode='lines',
-                    name=f"{cur_idx}: {cur_title} Fit LS {cur_reg_order} ({yi})",
-                    legendgroup=f"group_{cur_idx}", # <--- CRITICAL FIX: Links regression line to dataset
+                    name=f"{cur_idx}: {cur_title} Fit LS {cur_reg_order}",
+                    legendgroup=f"group_{cur_idx}",
                     line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
                     opacity=0.7, hoverinfo='skip', showlegend=False
                 ), row=row, col=col)
 
-    # --- AXIS CONFIGURATION ---
+    # --- AXIS CONFIGURATION (FIXED) ---
     for idx_y, yi in enumerate(y_list):
         row = idx_y // ncols + 1
         col = idx_y % ncols + 1
         
-        # Determine Label: Use global ylabel if provided, else use the column name (yi)
         axis_title = ylabel if ylabel else yi
+        # NEW: Explicitly define x-axis title for this subplot
+        x_axis_title = xlabel if xlabel else x
         
         fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
-        fig.update_xaxes(title_standoff=15, row=row, col=col)
+        # NEW: Added title_text=x_axis_title to update_xaxes
+        fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
 
     # Global Axis Limits
     for idx_y, yi in enumerate(y_list):
@@ -558,7 +543,7 @@ def unidisplot(list_of_datasets, x):
 # Import your plotly-based utilities from the previous step
 # from your_script import Dataset, uniplot, default_hue_palette, table_read
 
-class UniChartNotebook:
+class UnichartNotebook:
     def __init__(self):
         """
         Initialize the Notebook-based UniChart environment.
@@ -810,40 +795,37 @@ class UniChartNotebook:
     # ------------------------------------------------------------------
     # The Plot Command
     # ------------------------------------------------------------------
-    def plot(self, x=None, y=None, figsize=(12,8), ncols=None, nrows=None, subplot_titles=None, suptitle=None, **kwargs):
+    def plot(self, x=None, y=None, figsize=(12, 8), ncols=None, nrows=None, subplot_titles=None, suptitle=None, **kwargs):
             """
-            Main plotting wrapper. Calls the Plotly uniplot function.
-            Use subplot_titles=['Title A', 'Title B'] to manually label subplots.
+            Main plotting wrapper. Calls the Plotly uniplot function and applies 
+            local decorations (lines, highlights, and limits) to specific subplots.
             """
+            # 1. State Management & Defaults
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x = x
             self.last_y = y
 
+            # Sync subplot dimensions logic with uniplot
             if ncols is None and nrows is None:
                 if self.last_ncols is not None or self.last_nrows is not None:
-                    ncols = self.last_ncols
-                    nrows = self.last_nrows
-            else:
-                if ncols is None and nrows is not None:
-                    self.last_nrows = nrows
-                elif nrows is None and ncols is not None:
-                    self.last_ncols = ncols
-                else:
-                    self.last_ncols = ncols
-                    self.last_nrows = nrows
+                    ncols, nrows = self.last_ncols, self.last_nrows
+            
+            # Update persistent state
+            self.last_ncols = ncols
+            self.last_nrows = nrows
 
-            # Pass class attributes for styling
+            # 2. Prepare Arguments
             plot_args = {
                 'list_of_datasets': self.uset,
                 'x': x,
                 'y': y,
                 'darkmode': self.darkmode,
                 'display_parms': self.display_parms,
-                'suptitle': self.suptitle,
+                'suptitle': suptitle or self.suptitle,
                 'xlabel': self.x_label,      
                 'ylabel': self.y_label, 
-                'subplot_titles': subplot_titles, # <--- Pass subplot titles
+                'subplot_titles': subplot_titles,
                 'return_axes': True,
                 'figsize': figsize,
                 'ncols': ncols,
@@ -851,55 +833,64 @@ class UniChartNotebook:
             }
             plot_args.update(kwargs)
 
-            # 1. Generate Basic Plot
+            # 3. Generate the Base Figure
             fig = uniplot(**plot_args)
+            
+            # 4. Extract Final Grid Dimensions (to ensure decorations land in the right spot)
+            # uniplot auto-calculates these if they were None
+            y_list = y if isinstance(y, list) else [y]
+            n_y = len(y_list)
+            
+            # Logic mirroring uniplot's internal layout engine
+            if ncols is None and nrows is None:
+                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+            elif ncols is None:
+                calc_ncols = int(np.ceil(n_y / nrows))
+            else:
+                calc_ncols = ncols
+            
+            # Safety check for division
+            calc_ncols = max(1, calc_ncols)
 
-            # 2. Add Decorations (Lines/Highlights)
-            for col, lines in self.lines.items():
-                if col == x:
+            # 5. Apply Decorations (Targeting specific subplots)
+            for col_name, lines in self.lines.items():
+                if col_name == x:
+                    # X-axis lines usually apply to all subplots in the column
                     for l in lines:
                         fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
-                elif col == y or (isinstance(y, list) and col in y):
-                    for l in lines:
-                        fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'])
+                elif col_name in y_list:
+                    for idx, yi in enumerate(y_list):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            for l in lines:
+                                fig.add_hline(y=l['level'], line_dash=l['dash'], 
+                                            line_color=l['color'], row=r, col=c)
 
-            for col, hls in self.highlights.items():
-                if col == x:
+            for col_name, hls in self.highlights.items():
+                if col_name == x:
                     for h in hls:
-                        fig.add_vrect(
-                            x0=h['range'][0], x1=h['range'][1],
-                            fillcolor=h['color'], opacity=h['opacity'],
-                            layer="below", line_width=0
-                        )
-                elif col == y:
-                    for h in hls:
-                        fig.add_hrect(
-                            y0=h['range'][0], y1=h['range'][1],
-                            fillcolor=h['color'], opacity=h['opacity'],
-                            layer="below", line_width=0
-                        )
+                        fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'], 
+                                    opacity=h['opacity'], layer="below", line_width=0)
+                elif col_name in y_list:
+                    for idx, yi in enumerate(y_list):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            for h in hls:
+                                fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'], 
+                                            opacity=h['opacity'], layer="below", line_width=0, row=r, col=c)
 
-            # 4. Apply Axis Limits
-            if isinstance(x, list):
-                if x[0] in self.axis_limits:
-                    fig.update_xaxes(range=self.axis_limits[x[0]])
-            elif x in self.axis_limits:
+            # 6. Apply Axis Limits
+            if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
 
-            y_list = y if isinstance(y, list) else [y]
-            if isinstance(y, list):
-                for idx, yi in enumerate(y_list):
-                    if yi in self.axis_limits:
-                        row = idx // (ncols or 1) + 1
-                        col = idx % (ncols or 1) + 1
-                        fig.update_yaxes(range=self.axis_limits[yi], row=row, col=col)
-            else:
-                if y in self.axis_limits:
-                    fig.update_yaxes(range=self.axis_limits[y])
+            for idx, yi in enumerate(y_list):
+                if yi in self.axis_limits:
+                    r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                    fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-            self.last_fig = fig # Store figure for potential export
+            self.last_fig = fig
+            fig.show()
             return fig
-    
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
         Save the last generated plot to a PNG file.
@@ -968,14 +959,14 @@ class UniChartNotebook:
 
     def help(self):
         """
-        Display help information for the UniChartNotebook class:
+        Display help information for the UnichartNotebook class:
         - Class docstring
         - Public methods and their signatures/descriptions
         - Public attributes (non-callable properties) with their types and values (if not too long)
         - Example usage tips
         """
         print("=" * 70)
-        print("📚 UNICHARTNOTEBOOK HELP")
+        print("📚 UnichartNotebook HELP")
         print("=" * 70)
         
         # 1. Class docstring
