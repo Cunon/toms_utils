@@ -511,6 +511,217 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     if return_axes: return fig
     fig.show()
     return fig
+def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None, 
+                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                        darkmode=True, x_lim=None, y_lim=None, axis_limits=None, return_axes=False):
+    """
+    Revised plotting engine for Multi-Y Axis.
+    - Fixes 'ValueError: position' by shrinking X-axis domain to make room for extra axes.
+    - Supports proper line widths and dash styles.
+    """
+    active_datasets = [d for d in list_of_datasets if d.select]
+    if not active_datasets:
+        print("No datasets selected.")
+        return None
+
+    y_list = y if isinstance(y, list) else [y]
+    axis_limits = axis_limits or {}
+    
+    # --- Grid Setup ---
+    n_sets = len(active_datasets)
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None:
+        nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None:
+        ncols = int(np.ceil(n_sets / nrows))
+        
+    sp_titles = [ds.title_format for ds in active_datasets]
+    
+    # We DO NOT set a huge right margin here anymore; we handle spacing via domain shrinking.
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=sp_titles, shared_xaxes=False)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle if suptitle else f"Dataset Comparison", 'x': 0.5},
+        'showlegend': True,
+        # Standard margin is usually fine now, or slight increase
+        'margin': dict(r=50) 
+    }
+    if figsize:
+        layout_args['width'] = figsize[0] * 100
+        layout_args['height'] = figsize[1] * 100
+        
+    fig.update_layout(**layout_args)
+    color_cycle = px.colors.qualitative.Plotly
+    
+    # Counter for generating new axis IDs (starts after the grid axes)
+    next_free_axis_idx = (nrows * ncols) + 1
+
+    for idx_ds, dataset in enumerate(active_datasets):
+        row = (idx_ds // ncols) + 1
+        col = (idx_ds % ncols) + 1
+        
+        # Resolve Axis Names
+        subplot_index = (row - 1) * ncols + col
+        base_x_name = "xaxis" if subplot_index == 1 else f"xaxis{subplot_index}"
+        base_y_name = "yaxis" if subplot_index == 1 else f"yaxis{subplot_index}"
+        
+        # --- DOMAIN MANAGEMENT ---
+        # 1. Get original domain (default [0,1] if not found)
+        # make_subplots pre-populates these, so we can read them.
+        try:
+            old_domain = fig.layout[base_x_name].domain
+            if not old_domain: old_domain = [0, 1]
+        except:
+            old_domain = [0, 1]
+            
+        d_start, d_end = old_domain
+        
+        # 2. Calculate space needed for EXTRA axes (vars 3, 4, etc.)
+        # Variable 1 is Left. Variable 2 is Right (anchored to X). 
+        # Variable 3+ need their own space.
+        extras_count = max(0, len(y_list) - 2)
+        
+        # We reserve roughly 0.08 (8% of width) per extra axis
+        # You can tweak 'width_per_axis' if labels are getting cut off
+        width_per_axis = 0.08 
+        required_space = extras_count * width_per_axis
+        
+        # 3. Shrink the X-axis to make room
+        new_d_end = d_end - required_space
+        # Safety check: don't invert axis if too many vars
+        if new_d_end <= d_start + 0.1: new_d_end = d_end 
+        
+        # Apply new domain to the subplot's X-axis
+        fig.layout[base_x_name].domain = [d_start, new_d_end]
+
+        # --- DATA PREP ---
+        df = dataset.df.copy()
+        if dataset.order == 'index': df = df.sort_index()
+        elif dataset.order: df = df.sort_values(by=dataset.order)
+        
+        if x not in df.columns:
+            cols_upper = {c.upper(): c for c in df.columns}
+            if x.upper() in cols_upper: x_col = cols_upper[x.upper()]
+            else: continue
+        else:
+            x_col = x
+
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            
+            var_color = color_cycle[idx_y % len(color_cycle)]
+            custom_data = df[[x_col, yi] + [c for c in (display_parms or []) if c in df.columns]]
+            ht = f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}<br>{yi}: %{{customdata[1]:.2f}}"
+            specific_limit = axis_limits.get(yi, None)
+
+            # Styling
+            line_dict = dict(color=var_color, width=dataset.linewidth)
+            if dataset.linestyle: line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
+
+            if idx_y == 0:
+                # --- PRIMARY AXIS (LEFT) ---
+                fig.add_trace(go.Scatter(
+                    x=df[x_col], y=df[yi],
+                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
+                    marker=dict(color=var_color, size=dataset.markersize or 6),
+                    line=line_dict,
+                    customdata=custom_data, hovertemplate=ht
+                ), row=row, col=col)
+                
+                # Update base Y-axis
+                u_dict = dict(title_text=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color), row=row, col=col)
+                if specific_limit: u_dict['range'] = specific_limit
+                fig.update_yaxes(**u_dict)
+
+            elif idx_y == 1:
+                # --- SECONDARY AXIS (Standard Right) ---
+                # This one is "free" (doesn't need custom positioning), 
+                # it just anchors to the (now shrunk) X-axis and sits on the right edge.
+                
+                # We need a new axis object, but we anchor it to the subplot's x
+                curr_y_axis = f"yaxis{next_free_axis_idx}"
+                curr_y_ref = f"y{next_free_axis_idx}"
+                next_free_axis_idx += 1
+                
+                fig.add_trace(go.Scatter(
+                    x=df[x_col], y=df[yi],
+                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
+                    marker=dict(color=var_color, size=dataset.markersize or 6),
+                    line=line_dict,
+                    customdata=custom_data, hovertemplate=ht,
+                    xaxis=base_x_name.replace("axis", ""), # e.g. "x2"
+                    yaxis=curr_y_ref
+                ))
+                
+                layout_axis = dict(
+                    title=yi,
+                    title_font=dict(color=var_color),
+                    tickfont=dict(color=var_color),
+                    anchor=base_x_name.replace("axis", ""), # Anchors to x, so sits at x-domain end
+                    overlaying=base_y_name.replace("axis", ""), # y, y2, etc
+                    side='right',
+                    showgrid=False
+                )
+                if specific_limit: layout_axis['range'] = specific_limit
+                fig.update_layout({curr_y_axis: layout_axis})
+                
+            else:
+                # --- TERTIARY+ AXES (Floating Right) ---
+                # These sit in the empty space we created by shrinking the domain.
+                
+                curr_y_axis = f"yaxis{next_free_axis_idx}"
+                curr_y_ref = f"y{next_free_axis_idx}"
+                next_free_axis_idx += 1
+                
+                # Calculate Position
+                # It starts at the new end of the domain + a small offset
+                # idx_y starts at 2 here. 
+                # The first "floating" axis should be at new_d_end + offset.
+                # The standard right axis (idx=1) is AT new_d_end.
+                # So we push out from there.
+                
+                # We place them iteratively
+                extra_idx = idx_y - 1 # 1st extra, 2nd extra...
+                pos = new_d_end + (extra_idx * width_per_axis)
+                # Cap at 1.0 just in case
+                pos = min(0.99, pos) 
+                
+                fig.add_trace(go.Scatter(
+                    x=df[x_col], y=df[yi],
+                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
+                    marker=dict(color=var_color, size=dataset.markersize or 6),
+                    line=line_dict,
+                    customdata=custom_data, hovertemplate=ht,
+                    xaxis=base_x_name.replace("axis", ""),
+                    yaxis=curr_y_ref
+                ))
+                
+                layout_axis = dict(
+                    title=yi,
+                    title_font=dict(color=var_color),
+                    tickfont=dict(color=var_color),
+                    anchor="free",          # Free floating
+                    overlaying=base_y_name.replace("axis", ""),
+                    side='right',
+                    position=pos,           # Explicit position in [0, 1]
+                    showgrid=False
+                )
+                if specific_limit: layout_axis['range'] = specific_limit
+                fig.update_layout({curr_y_axis: layout_axis})
+
+        # Final cleanup for the subplot
+        fig.update_xaxes(title_text=x, showgrid=True, row=row, col=col)
+        if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
+
+    if return_axes: return fig 
+    fig.show()
+    return fig
 
 def unidisplot(list_of_datasets, x):
     """
@@ -793,12 +1004,50 @@ class UnichartNotebook:
         self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
 
     # ------------------------------------------------------------------
+    # Decorations (Lines/Highlights)
+    # ------------------------------------------------------------------
+    def scale(self, column, range_tuple):
+            """
+            Set specific axis limits for a parameter.
+            
+            Parameters:
+            -----------
+            column : str
+                The name of the column (parameter) to constrain.
+            range_tuple : tuple, list, or 'clear'
+                The (min, max) range for the axis. 
+                Pass 'clear' or None to remove the restriction.
+                
+            Example:
+            --------
+            UC.scale('pressure', (900, 1100))
+            """
+            if range_tuple == 'clear' or range_tuple is None:
+                if column in self.axis_limits:
+                    del self.axis_limits[column]
+                    print(f"Limits cleared for '{column}'.")
+            else:
+                if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
+                    self.axis_limits[column] = range_tuple
+                    print(f"Limits set for '{column}': {range_tuple}")
+                else:
+                    raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
+
+    # ------------------------------------------------------------------
     # The Plot Command
     # ------------------------------------------------------------------
-    def plot(self, x=None, y=None, figsize=(12, 8), ncols=None, nrows=None, subplot_titles=None, suptitle=None, **kwargs):
+    def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None, 
+                subplot_titles=None, suptitle=None, **kwargs):
             """
-            Main plotting wrapper. Calls the Plotly uniplot function and applies 
-            local decorations (lines, highlights, and limits) to specific subplots.
+            Main plotting wrapper.
+            
+            Parameters:
+            -----------
+            by : str, optional
+                'vars' (default) - Creates a subplot for each Y variable.
+                                Best for comparing multiple datasets on specific metrics.
+                'sets'           - Creates a subplot for each Dataset.
+                                Best for looking at all metrics for a specific dataset.
             """
             # 1. State Management & Defaults
             if x is None: x = self.last_x
@@ -806,91 +1055,139 @@ class UnichartNotebook:
             self.last_x = x
             self.last_y = y
 
-            # Sync subplot dimensions logic with uniplot
+            # Sync persistent dimensions
             if ncols is None and nrows is None:
                 if self.last_ncols is not None or self.last_nrows is not None:
                     ncols, nrows = self.last_ncols, self.last_nrows
-            
-            # Update persistent state
             self.last_ncols = ncols
             self.last_nrows = nrows
 
-            # 2. Prepare Arguments
-            plot_args = {
-                'list_of_datasets': self.uset,
-                'x': x,
-                'y': y,
-                'darkmode': self.darkmode,
-                'display_parms': self.display_parms,
-                'suptitle': suptitle or self.suptitle,
-                'xlabel': self.x_label,      
-                'ylabel': self.y_label, 
-                'subplot_titles': subplot_titles,
-                'return_axes': True,
-                'figsize': figsize,
-                'ncols': ncols,
-                'nrows': nrows,
-            }
-            plot_args.update(kwargs)
+            # 2. Dispatch Logic
+            if by == 'sets' or by == 'datasets':
+                # --- ROUTE TO DATASET GRID ---
+                fig = uniplot_per_dataset(
+                    list_of_datasets=self.uset,
+                    x=x,
+                    y=y,
+                    display_parms=self.display_parms,
+                    suptitle=suptitle or self.suptitle,
+                    figsize=figsize,
+                    ncols=ncols,
+                    nrows=nrows,
+                    darkmode=self.darkmode,
+                    x_lim=self.axis_limits.get(x),
+                    y_lim=None, 
+                    axis_limits=self.axis_limits,  # <--- NEW ARGUMENT
+                    return_axes=True 
+                )
+                # Set flag for decoration logic
+                mode = 'sets'
+                
+            else:
+                # --- ROUTE TO VARIABLE GRID (Original) ---
+                plot_args = {
+                    'list_of_datasets': self.uset,
+                    'x': x, 
+                    'y': y,
+                    'darkmode': self.darkmode,
+                    'display_parms': self.display_parms,
+                    'suptitle': suptitle or self.suptitle,
+                    'xlabel': self.x_label,      
+                    'ylabel': self.y_label, 
+                    'subplot_titles': subplot_titles,
+                    'return_axes': True, # Important: get figure back instead of showing immediately
+                    'figsize': figsize,
+                    'ncols': ncols,
+                    'nrows': nrows,
+                }
+                plot_args.update(kwargs)
+                fig = uniplot(**plot_args)
+                mode = 'vars'
 
-            # 3. Generate the Base Figure
-            fig = uniplot(**plot_args)
-            
-            # 4. Extract Final Grid Dimensions (to ensure decorations land in the right spot)
-            # uniplot auto-calculates these if they were None
+            if fig is None: return
+
+            # 3. Apply Decorations (Unified Logic)
+            # We need to calculate grid dimensions to know where to place lines/highlights
             y_list = y if isinstance(y, list) else [y]
-            n_y = len(y_list)
+            active_sets = [d for d in self.uset if d.select]
             
-            # Logic mirroring uniplot's internal layout engine
+            if mode == 'vars':
+                n_items = len(y_list)
+            else:
+                n_items = len(active_sets)
+
+            # Standard grid calc used by both plotters
             if ncols is None and nrows is None:
-                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
             elif ncols is None:
-                calc_ncols = int(np.ceil(n_y / nrows))
+                calc_ncols = int(np.ceil(n_items / nrows))
             else:
                 calc_ncols = ncols
-            
-            # Safety check for division
             calc_ncols = max(1, calc_ncols)
 
-            # 5. Apply Decorations (Targeting specific subplots)
+            # Decoration Helper
+            def apply_to_all_subplots(func, **kwargs):
+                for i in range(n_items):
+                    r = (i // calc_ncols) + 1
+                    c = (i % calc_ncols) + 1
+                    func(row=r, col=c, **kwargs)
+
+            # --- LINES ---
             for col_name, lines in self.lines.items():
                 if col_name == x:
-                    # X-axis lines usually apply to all subplots in the column
+                    # Vertical lines on X axis apply to everyone
                     for l in lines:
                         fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
                 elif col_name in y_list:
-                    for idx, yi in enumerate(y_list):
-                        if yi == col_name:
-                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                            for l in lines:
-                                fig.add_hline(y=l['level'], line_dash=l['dash'], 
-                                            line_color=l['color'], row=r, col=c)
+                    # Horizontal lines differ based on mode
+                    if mode == 'vars':
+                        # Only apply to the specific subplot for this variable
+                        for idx, yi in enumerate(y_list):
+                            if yi == col_name:
+                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                                for l in lines:
+                                    fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'], row=r, col=c)
+                    else: # mode == 'sets'
+                        # Variable exists on ALL subplots
+                        for l in lines:
+                            apply_to_all_subplots(fig.add_hline, y=l['level'], line_dash=l['dash'], line_color=l['color'])
 
+            # --- HIGHLIGHTS ---
             for col_name, hls in self.highlights.items():
                 if col_name == x:
                     for h in hls:
                         fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'], 
                                     opacity=h['opacity'], layer="below", line_width=0)
                 elif col_name in y_list:
-                    for idx, yi in enumerate(y_list):
-                        if yi == col_name:
-                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                            for h in hls:
-                                fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'], 
-                                            opacity=h['opacity'], layer="below", line_width=0, row=r, col=c)
+                    if mode == 'vars':
+                        for idx, yi in enumerate(y_list):
+                            if yi == col_name:
+                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                                for h in hls:
+                                    fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'], 
+                                                opacity=h['opacity'], layer="below", line_width=0, row=r, col=c)
+                    else: # mode == 'sets'
+                        for h in hls:
+                            apply_to_all_subplots(fig.add_hrect, y0=h['range'][0], y1=h['range'][1], 
+                                                fillcolor=h['color'], opacity=h['opacity'], layer="below", line_width=0)
 
-            # 6. Apply Axis Limits
+            # --- LIMITS (UPDATED) ---
+            # X limits
             if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
 
-            for idx, yi in enumerate(y_list):
-                if yi in self.axis_limits:
-                    r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                    fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+            # Y limits
+            # CHANGE: Only apply post-hoc limits if we are in 'vars' mode. 
+            # In 'sets' mode, limits were already applied inside uniplot_per_dataset.
+            if mode == 'vars':
+                for idx, yi in enumerate(y_list):
+                    if yi in self.axis_limits:
+                        r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                        fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
             self.last_fig = fig
-            # fig.show()
             return fig
+    
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
         Save the last generated plot to a PNG file.
