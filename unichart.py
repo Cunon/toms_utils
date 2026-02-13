@@ -432,7 +432,11 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
             ht = f"<b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
             for parm in hover_cols:
-                ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
+                # Check if the column is numeric to apply 5 sig fig formatting
+                if pd.api.types.is_numeric_dtype(df[parm]):
+                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
+                else:
+                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
             mode_parts = []
@@ -677,13 +681,6 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 curr_y_axis = f"yaxis{next_free_axis_idx}"
                 curr_y_ref = f"y{next_free_axis_idx}"
                 next_free_axis_idx += 1
-                
-                # Calculate Position
-                # It starts at the new end of the domain + a small offset
-                # idx_y starts at 2 here. 
-                # The first "floating" axis should be at new_d_end + offset.
-                # The standard right axis (idx=1) is AT new_d_end.
-                # So we push out from there.
                 
                 # We place them iteratively
                 extra_idx = idx_y - 1 # 1st extra, 2nd extra...
