@@ -720,6 +720,112 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
     fig.show()
     return fig
 
+def unibar(list_of_datasets, x, y, barmode='group', color=None, 
+           suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
+           darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+           y_lim=None, return_axes=False):
+    """
+    Grouped Bar Chart version of uniplot. 
+    Subplots are organized by Y-variables.
+    """
+    y_list = y if isinstance(y, list) else [y]
+    n_y = len(y_list)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+        nrows = int(np.ceil(n_y / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Bar Comparison: {x}", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        for idx_y, yi in enumerate(y_list):
+            row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
+            if yi not in df.columns: continue
+
+            fig.add_trace(go.Bar(
+                x=df[x], y=df[yi],
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=ds.color if not color else color,
+                opacity=ds.alpha,
+                showlegend=(idx_y == 0)
+            ), row=row, col=col)
+
+    # Final Axis formatting
+    fig.update_xaxes(title_text=xlabel or x)
+    fig.update_yaxes(title_text=ylabel or "Value")
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
+                       suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                       darkmode=False, y_lim=None, return_axes=False):
+    """
+    Grouped Bar Chart version of uniplot_per_dataset.
+    Subplots are organized by Dataset.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    y_list = y if isinstance(y, list) else [y]
+    n_sets = len(active_ds)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Bar Comparison", 'x': 0.5},
+        'barmode': barmode,
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df
+        
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            
+            fig.add_trace(go.Bar(
+                x=df[x], y=df[yi],
+                name=yi,
+                legendgroup=yi,
+                marker_color=color_cycle[idx_y % len(color_cycle)],
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=x)
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
 def unidisplot(list_of_datasets, x):
     """
     Create a unified distribution plot (Histogram/KDE approximation) for a list of datasets.
@@ -1184,7 +1290,33 @@ class UnichartNotebook:
 
             self.last_fig = fig
             return fig
-    
+
+
+    # ------------------------------------------------------------------
+    # The bar Command
+    # ------------------------------------------------------------------
+
+    def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None):
+        """
+        Unified interface for Bar Charts.
+        """
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
+
+        if by in ['sets', 'datasets']:
+            return unibar_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=self.axis_limits.get(y[0] if isinstance(y, list) else y)
+            )
+        else:
+            return unibar(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode
+            )
+
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
         Save the last generated plot to a PNG file.
