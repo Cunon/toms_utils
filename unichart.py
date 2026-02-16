@@ -945,36 +945,154 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     return fig
 
 
-def unidisplot(list_of_datasets, x):
+def unihistogram(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                 color=None, suptitle=None, subplot_titles=None, darkmode=False, 
+                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
     """
-    Create a unified distribution plot (Histogram/KDE approximation) for a list of datasets.
-    """
-    fig = go.Figure()
+    Create a unified histogram for a list of datasets.
+    Subplots are organized by Variable (x).
     
-    for dataset in list_of_datasets:
-        if dataset.select:
-            df = dataset.df
-            if x not in df.columns:
-                continue
-                
-            # Using Histogram with probability density normalization to mimic KDE behavior roughly
+    Parameters:
+    - color: str, optional (Overrides dataset colors if provided)
+    """
+    x_list = x if isinstance(x, list) else [x]
+    n_x = len(x_list)
+    
+    # --- Grid Setup ---
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_x)))))
+        nrows = int(np.ceil(n_x / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_x / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_x / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or x_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Distribution Comparison", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        # Use explicit color arg if provided, otherwise use the Dataset's class color
+        use_color = color if color else ds.color
+
+        for idx_x, xi in enumerate(x_list):
+            row, col = (idx_x // ncols) + 1, (idx_x % ncols) + 1
+            
+            if xi not in df.columns: continue
+
+            clean_data = df[xi].dropna()
+
             fig.add_trace(go.Histogram(
-                x=df[x],
-                name=dataset.get_title(),
-                histnorm='probability density',
-                opacity=0.6
-            ))
+                x=clean_data,
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=use_color,
+                opacity=opacity,
+                nbinsx=nbins,
+                histnorm=histnorm,
+                showlegend=(idx_x == 0)
+            ), row=row, col=col)
 
-    fig.update_layout(
-        title=f"Distribution of {x}",
-        xaxis_title=x,
-        yaxis_title="Density",
-        barmode='overlay'
-    )
+    # Final Formatting
+    if x_lim: fig.update_xaxes(range=x_lim)
+    
+    y_label = "Density" if "density" in histnorm else "Count"
+    fig.update_yaxes(title_text=y_label)
+
+    if return_axes: return fig
     fig.show()
+    return fig
 
-# Import your plotly-based utilities from the previous step
-# from your_script import Dataset, uniplot, default_hue_palette, table_read
+
+def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                            darkmode=False, x_lim=None, return_axes=False):
+    """
+    Create a unified histogram where Subplots are organized by Dataset.
+    
+    Color Logic:
+    - If plotting 1 variable: Uses the Dataset's unique color.
+    - If plotting >1 variable: Uses a color cycle (to distinguish variables), 
+      unless 'color' override is provided.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    x_list = x if isinstance(x, list) else [x]
+    n_sets = len(active_ds)
+
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    # --- Grid Setup ---
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Distribution Analysis", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df.copy()
+        
+        for idx_x, xi in enumerate(x_list):
+            if xi not in df.columns: continue
+            
+            clean_data = df[xi].dropna()
+            
+            # Color Logic:
+            # 1. Global override 'color'
+            # 2. If single variable: use Dataset color (ds.color)
+            # 3. If multi variable: use Cycle (to distinguish x1 vs x2)
+            if color:
+                use_color = color
+            elif len(x_list) == 1:
+                use_color = ds.color
+            else:
+                use_color = color_cycle[idx_x % len(color_cycle)]
+
+            fig.add_trace(go.Histogram(
+                x=clean_data,
+                name=xi,
+                legendgroup=xi,
+                marker_color=use_color,
+                opacity=opacity,
+                nbinsx=nbins,
+                histnorm=histnorm,
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    if x_lim: fig.update_xaxes(range=x_lim)
+    
+    y_label = "Density" if "density" in histnorm else "Count"
+    fig.update_yaxes(title_text=y_label)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
 
 class UnichartNotebook:
     def __init__(self):
@@ -1443,45 +1561,191 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
 
     def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
-            figsize=(12, 8), ncols=None, nrows=None):
+                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
+            """
+            Unified interface for Box Plots.
+            
+            Parameters:
+            -----------
+            by : str
+                'vars' (default) - Subplots by variable (compare datasets side-by-side).
+                'sets' - Subplots by dataset (compare variables side-by-side).
+            points : str
+                'outliers' (default), 'all', 'suspectedoutliers', or False.
+            notched : bool
+                Whether to draw a notched boxplot (useful for rough confidence interval comparison).
+            color : str, optional
+                Override color for all boxes (only applies when by='vars').
+            """
+            if x is None: x = self.last_x
+            if y is None: y = self.last_y
+            self.last_x, self.last_y = x, y
+
+            # Resolve limits if they exist for the primary Y
+            primary_y = y[0] if isinstance(y, list) else y
+            y_limit = self.axis_limits.get(primary_y)
+
+            if by in ['sets', 'datasets']:
+                self.last_fig = unibox_per_dataset(
+                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                    points=points, notched=notched,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+                )
+            else:
+                self.last_fig = unibox(
+                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                    points=points, notched=notched,
+                    color=color, # <--- Added this passthrough
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+                )
+                
+            if self.last_fig:
+                self.last_fig.show()
+    # ------------------------------------------------------------------
+    # The histogram Command
+    # ------------------------------------------------------------------
+    def histogram(self, x=None, by='vars', nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                  color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
         """
-        Unified interface for Box Plots.
+        Unified interface for Histograms.
         
         Parameters:
         -----------
+        x : str or list
+            The column(s) to distribute.
         by : str
-            'vars' (default) - Subplots by variable (compare datasets side-by-side).
-            'sets' - Subplots by dataset (compare variables side-by-side).
-        points : str
-            'outliers' (default), 'all', 'suspectedoutliers', or False.
-        notched : bool
-            Whether to draw a notched boxplot (useful for rough confidence interval comparison).
+            'vars' (default) - Subplots by variable (compare datasets).
+                               Uses Dataset colors.
+            'sets'           - Subplots by dataset (compare variables).
+                               Uses Dataset color (if 1 var) or Color Cycle (if >1 var).
+        histnorm : str
+            '' (default, count), 'percent', 'probability', 'density', 'probability density'
+        color : str, optional
+            Override the color for all traces.
         """
         if x is None: x = self.last_x
-        if y is None: y = self.last_y
-        self.last_x, self.last_y = x, y
-
-        # Resolve limits if they exist for the primary Y
-        primary_y = y[0] if isinstance(y, list) else y
-        y_limit = self.axis_limits.get(primary_y)
+        self.last_x = x
+        
+        # Resolve limit
+        limit = None
+        if isinstance(x, str):
+            limit = self.axis_limits.get(x)
+        elif isinstance(x, list) and len(x) == 1:
+            limit = self.axis_limits.get(x[0])
 
         if by in ['sets', 'datasets']:
-            self.last_fig = unibox_per_dataset(
-                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
-                points=points, notched=notched,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+            self.last_fig = unihistogram_by_dataset(
+                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
+                barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
         else:
-            self.last_fig = unibox(
-                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
-                points=points, notched=notched,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+            self.last_fig = unihistogram(
+                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
+                barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
             
         if self.last_fig:
             self.last_fig.show()
+    # ------------------------------------------------------------------
+    # The table Command
+    # ------------------------------------------------------------------
+    def table(self, cols=None, title=None):
+        """
+        Display a Plotly Table of specific columns from selected datasets.
+        
+        Parameters:
+        -----------
+        cols : str or list, optional
+            The columns to display.
+            If None, defaults to [self.last_x] + [self.last_y].
+        title : str, optional
+            Title for the table layout.
+        """
+        # 1. Resolve Columns
+        if cols is None:
+            if self.last_x is None or self.last_y is None:
+                print("No columns specified and no previous plot variables defined.")
+                return
+            
+            # Construct list from last_x and last_y (which might be a list or str)
+            y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
+            target_cols = [self.last_x] + y_part
+        else:
+            target_cols = cols if isinstance(cols, list) else [cols]
+
+        # 2. Aggregate Data from Selected Datasets
+        combined_dfs = []
+        
+        for ds in self.uset:
+            if not ds.select:
+                continue
+            
+            # Filter for existing columns only
+            valid_cols = [c for c in target_cols if c in ds.df.columns]
+            
+            if not valid_cols:
+                continue
+                
+            subset = ds.df[valid_cols].copy()
+            # Add a source column to identify the dataset
+            subset.insert(0, 'Dataset', ds.title)
+            combined_dfs.append(subset)
+
+        if not combined_dfs:
+            print("No data found for the specified columns in selected datasets.")
+            return
+
+        final_df = pd.concat(combined_dfs, ignore_index=True)
+        
+        # Fill NaNs for display purposes (optional, but looks better in tables)
+        final_df = final_df.fillna('-')
+
+        # 3. Define Styling based on Darkmode
+        if self.darkmode:
+            header_color = 'rgb(30, 30, 30)'
+            cell_color = 'rgb(50, 50, 50)'
+            font_color = 'white'
+            line_color = 'rgb(70, 70, 70)'
+        else:
+            header_color = 'rgb(230, 230, 230)'
+            cell_color = 'white'
+            font_color = 'black'
+            line_color = 'rgb(200, 200, 200)'
+
+        # 4. Create Plotly Table
+        fig = go.Figure(data=[go.Table(
+            header=dict(
+                values=list(final_df.columns),
+                fill_color=header_color,
+                align='left',
+                font=dict(color=font_color, size=12, weight='bold'),
+                line_color=line_color
+            ),
+            cells=dict(
+                values=[final_df[k].tolist() for k in final_df.columns],
+                fill_color=cell_color,
+                align='left',
+                font=dict(color=font_color, size=11),
+                line_color=line_color,
+                height=25
+            )
+        )])
+
+        # Layout updates
+        layout_args = {
+            'title': {'text': title or "Data Table", 'x': 0.5},
+            'template': "plotly_dark" if self.darkmode else "plotly_white",
+            'margin': dict(l=20, r=20, t=50, b=20),
+        }
+        fig.update_layout(**layout_args)
+        
+        fig.show()
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
