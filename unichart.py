@@ -826,6 +826,125 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
     fig.show()
     return fig
 
+def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
+           color=None, suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
+           darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+           y_lim=None, return_axes=False):
+    """
+    Boxplot version of uniplot.
+    Subplots are organized by Y-variables.
+    
+    Parameters:
+    - points: 'all', 'outliers', 'suspectedoutliers', or False
+    - notched: True/False (for confidence intervals)
+    """
+    y_list = y if isinstance(y, list) else [y]
+    n_y = len(y_list)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+        nrows = int(np.ceil(n_y / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Boxplot Comparison: {x}", 'x': 0.5},
+        'boxmode': boxmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        for idx_y, yi in enumerate(y_list):
+            row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
+            if yi not in df.columns: continue
+
+            # Create Box Trace
+            fig.add_trace(go.Box(
+                x=df[x], 
+                y=df[yi],
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=ds.color if not color else color,
+                opacity=ds.alpha,
+                boxpoints=points,
+                notched=notched,
+                line=dict(width=ds.linewidth),
+                showlegend=(idx_y == 0)
+            ), row=row, col=col)
+
+    # Final Axis formatting
+    fig.update_xaxes(title_text=xlabel or x)
+    fig.update_yaxes(title_text=ylabel or "Value")
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
+                       suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                       darkmode=False, y_lim=None, return_axes=False):
+    """
+    Boxplot version of uniplot_per_dataset.
+    Subplots are organized by Dataset.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    y_list = y if isinstance(y, list) else [y]
+    n_sets = len(active_ds)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Box Comparison", 'x': 0.5},
+        'boxmode': boxmode,
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df
+        
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            
+            fig.add_trace(go.Box(
+                x=df[x], 
+                y=df[yi],
+                name=yi,
+                legendgroup=yi,
+                marker_color=color_cycle[idx_y % len(color_cycle)],
+                boxpoints=points,
+                notched=notched,
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=x)
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+
 def unidisplot(list_of_datasets, x):
     """
     Create a unified distribution plot (Histogram/KDE approximation) for a list of datasets.
@@ -923,10 +1042,12 @@ class UnichartNotebook:
             self.uset.append(ds)
             print(f"Loaded Set {next_index}: {ds.title}")
 
-        # If requested, inject column names as variables into the global namespace
-        # Note: In Jupyter, we have to be careful polluting global scope. 
-        # We skipped this implementation to keep the class clean, 
-        # but user can access columns via standard pandas string references.
+        if load_cols_as_vars:
+            for column in df.columns:
+                try:
+                    exec(f"{column} = '{column}'", globals())
+                except Exception as e:
+                    print(f"Could not create variable for column '{column}': {e}")
         
         self._refresh_widgets()
 
@@ -1316,6 +1437,51 @@ class UnichartNotebook:
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode
             )
+
+    # ------------------------------------------------------------------
+    # The box Command
+    # ------------------------------------------------------------------
+
+    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
+            figsize=(12, 8), ncols=None, nrows=None):
+        """
+        Unified interface for Box Plots.
+        
+        Parameters:
+        -----------
+        by : str
+            'vars' (default) - Subplots by variable (compare datasets side-by-side).
+            'sets' - Subplots by dataset (compare variables side-by-side).
+        points : str
+            'outliers' (default), 'all', 'suspectedoutliers', or False.
+        notched : bool
+            Whether to draw a notched boxplot (useful for rough confidence interval comparison).
+        """
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
+
+        # Resolve limits if they exist for the primary Y
+        primary_y = y[0] if isinstance(y, list) else y
+        y_limit = self.axis_limits.get(primary_y)
+
+        if by in ['sets', 'datasets']:
+            self.last_fig = unibox_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                points=points, notched=notched,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+            )
+        else:
+            self.last_fig = unibox(
+                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                points=points, notched=notched,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+            )
+            
+        if self.last_fig:
+            self.last_fig.show()
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
