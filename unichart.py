@@ -1063,10 +1063,6 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
             
             clean_data = df[xi].dropna()
             
-            # Color Logic:
-            # 1. Global override 'color'
-            # 2. If single variable: use Dataset color (ds.color)
-            # 3. If multi variable: use Cycle (to distinguish x1 vs x2)
             if color:
                 use_color = color
             elif len(x_list) == 1:
@@ -1110,7 +1106,7 @@ class UnichartNotebook:
         self.darkmode = True 
         self.last_ncols = None
         self.last_nrows = None
-        self.last_fig = None # New: Store last figure for export
+        self.last_fig = None 
 
         self.suptitle = None
         

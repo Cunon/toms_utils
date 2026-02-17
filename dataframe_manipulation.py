@@ -1,5 +1,74 @@
 import pandas as pd
 
+import tkinter as tk
+from tkinter import filedialog
+import pandas as pd
+import os
+
+def open_datafile(initial_dir=None, force_format=None, add_file_info=False, **kwargs):
+    """
+    Opens a system file dialog to select a dataset and loads it into a Pandas DataFrame.
+    
+    Parameters:
+    - initial_dir (str): Directory to start the search in.
+    - force_format (str): Force a specific read method (e.g., 'csv') regardless of extension.
+    - add_file_info (bool): If True, adds 'FILENAME' and 'FILEPATH' columns to the DataFrame.
+    - **kwargs: Arbitrary keyword arguments passed directly to the pandas read function.
+    """
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    
+    file_path = filedialog.askopenfilename(
+        initialdir=initial_dir or os.getcwd(),
+        title="Select Data File",
+        filetypes=[
+            ("Data Files", "*.csv *.txt *.dat *.xlsx *.xls *.parquet *.json *.pkl"),
+            ("All Files", "*.*")
+        ]
+    )
+    
+    root.destroy()
+    
+    if not file_path:
+        print("Selection cancelled.")
+        return None
+
+    # Normalization logic
+    if force_format:
+        load_type = force_format.lower().strip('.')
+    else:
+        _, ext = os.path.splitext(file_path)
+        load_type = ext.lower().strip('.')
+    
+    try:
+        df = None
+        
+        # Load logic
+        if load_type in ['csv', 'txt', 'dat']:
+            df = pd.read_csv(file_path, **kwargs)
+        elif load_type in ['xlsx', 'xls', 'excel']:
+            df = pd.read_excel(file_path, **kwargs)
+        elif load_type == 'parquet':
+            df = pd.read_parquet(file_path, **kwargs)
+        elif load_type == 'json':
+            df = pd.read_json(file_path, **kwargs)
+        elif load_type in ['pkl', 'pickle']:
+            df = pd.read_pickle(file_path, **kwargs)
+        else:
+            print(f"Error: Format '{load_type}' not supported.")
+            return None
+
+        # Add Metadata columns if requested
+        if add_file_info and df is not None:
+            df['FILENAME'] = os.path.basename(file_path)
+            df['FILEPATH'] = os.path.abspath(file_path)
+            
+        return df
+
+    except Exception as e:
+        print(f"Error loading file: {e}")
+        return None
 
 def keep_columns(df, columns):
     """
