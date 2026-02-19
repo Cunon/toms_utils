@@ -1103,7 +1103,7 @@ class UnichartNotebook:
         self.last_y = None
         self.last_format = 'stack'
         self.last_ymult_format = 'color'
-        self.darkmode = True 
+        self.darkmode = False 
         self.last_ncols = None
         self.last_nrows = None
         self.last_fig = None 
@@ -1125,29 +1125,45 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Data Management
     # ------------------------------------------------------------------
-    def load_df(self, df, title=None, set_column=None, load_cols_as_vars=False):
+    def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
         """
         Load a DataFrame into the environment as datasets.
         """
         # Auto-title logic
         if not title:
-            if set_column and set_column in df.columns:
+            if set_name_column and set_name_column in df.columns:
                 pass # Title will be derived from group
             elif "TITLE" in df.columns:
-                set_column = "TITLE"
+                set_name_column = "TITLE"
             else:
                 df["TITLE"] = "Dataset"
-                set_column = "TITLE"
-        
+                set_name_column = "TITLE"
+
+            if set_idx_column and set_idx_column in df.columns:
+                pass # Index will be derived from group
+            elif "SET_NUMBER" in df.columns:
+                set_idx_column = "SET_NUMBER"
+            elif "INDEX" in df.columns:
+                set_idx_column = "INDEX"
+            else:
+                df["SET_NUMBER"] = df.index
+
         next_index = len(self.uset)
         
         # Group and create Dataset objects
-        if set_column and set_column in df.columns:
-            for group_name, df_subset in df.groupby(set_column):
-                # Handle cases where title might be implied
-                actual_title = title if title else str(group_name)
+        if set_idx_column and set_idx_column in df.columns:
+            for set_idx, df_subset in df.groupby(set_idx_column):
                 
-                ds = Dataset(df_subset.copy(), index=next_index, title=actual_title)
+                if title:
+                    final_title = title
+                elif set_name_column and set_name_column in df_subset.columns:
+                    final_title = str(df_subset.iloc[0][set_name_column])
+                elif "TITLE" in df_subset.columns:
+                    final_title = str(df_subset.iloc[0]["TITLE"])
+                else:
+                    final_title = f"Group {set_idx}"
+                
+                ds = Dataset(df_subset.copy(), index=next_index, title=final_title)
                 self.uset.append(ds)
                 print(f"Loaded Set {next_index}: {ds.title}")
                 next_index += 1
@@ -1207,10 +1223,15 @@ class UnichartNotebook:
         return [uset_slice]
 
     def select(self, uset_slice=None):
+        """Select the specified dataset(s)."""
         for ds in self.uset: ds.select = False # Exclusive select logic from original
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
         self._refresh_widgets()
+
+    def selected(self):
+        """Get the currently selected datasets."""
+        return [ds for ds in self.uset if ds.select]
 
     def omit(self, uset_slice=None):
         for ds in self._get_uset_slice(uset_slice):
