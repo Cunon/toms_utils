@@ -3,10 +3,13 @@ import platform
 import shutil
 import glob
 import re
-import time
 import difflib
 import inspect
 from pathlib import Path
+import stat
+import time
+from pathlib import Path
+import fnmatch
 
 def startfile(path):
     """
@@ -127,10 +130,6 @@ def mkdir(path, parents=False, exist_ok=True, *args, **kwargs):
     except Exception as e:
         print(f"mkdir error: {e}")
 
-import stat
-import time
-from pathlib import Path
-
 
 def ls(
     path=".",
@@ -143,6 +142,7 @@ def ls(
     reverse=False,
     dirs_first=False,
     human_readable=True,
+    case_sensitive=False
 ):
     """
     List files matching a glob pattern with optional flags.
@@ -194,7 +194,7 @@ def ls(
     try:
         # If `path` itself is a glob, treat it as the full pattern.
         if _has_wildcards(path_str):
-            candidates = list(base.glob(path_str))
+            candidates = list(base.glob(path_str, case_sensitive=case_sensitive))
             base_for_hidden = base
         else:
             base = Path(path_str)
@@ -203,7 +203,7 @@ def ls(
             if base.is_file():
                 candidates = [base]
             elif base.is_dir():
-                candidates = list(base.rglob(pattern)) if recursive else list(base.glob(pattern))
+                candidates = list(base.rglob(pattern, case_sensitive=case_sensitive)) if recursive else list(base.glob(pattern, case_sensitive=case_sensitive))
             else:
                 print(f"ls: {path}: No such file or directory")
                 return []

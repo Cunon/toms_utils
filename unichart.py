@@ -430,9 +430,13 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             def get_cd_idx(col_name):
                 return custom_data_cols.index(col_name)
 
-            ht = f"<b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
+            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
             for parm in hover_cols:
-                ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
+                # Check if the column is numeric to apply 5 sig fig formatting
+                if pd.api.types.is_numeric_dtype(df[parm]):
+                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
+                else:
+                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
             mode_parts = []
@@ -678,13 +682,6 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 curr_y_ref = f"y{next_free_axis_idx}"
                 next_free_axis_idx += 1
                 
-                # Calculate Position
-                # It starts at the new end of the domain + a small offset
-                # idx_y starts at 2 here. 
-                # The first "floating" axis should be at new_d_end + offset.
-                # The standard right axis (idx=1) is AT new_d_end.
-                # So we push out from there.
-                
                 # We place them iteratively
                 extra_idx = idx_y - 1 # 1st extra, 2nd extra...
                 pos = new_d_end + (extra_idx * width_per_axis)
@@ -723,36 +720,375 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
     fig.show()
     return fig
 
-def unidisplot(list_of_datasets, x):
+def unibar(list_of_datasets, x, y, barmode='group', color=None, 
+           suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
+           darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+           y_lim=None, return_axes=False):
     """
-    Create a unified distribution plot (Histogram/KDE approximation) for a list of datasets.
+    Grouped Bar Chart version of uniplot. 
+    Subplots are organized by Y-variables.
     """
-    fig = go.Figure()
-    
-    for dataset in list_of_datasets:
-        if dataset.select:
-            df = dataset.df
-            if x not in df.columns:
-                continue
-                
-            # Using Histogram with probability density normalization to mimic KDE behavior roughly
-            fig.add_trace(go.Histogram(
-                x=df[x],
-                name=dataset.get_title(),
-                histnorm='probability density',
-                opacity=0.6
-            ))
+    y_list = y if isinstance(y, list) else [y]
+    n_y = len(y_list)
 
-    fig.update_layout(
-        title=f"Distribution of {x}",
-        xaxis_title=x,
-        yaxis_title="Density",
-        barmode='overlay'
-    )
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+        nrows = int(np.ceil(n_y / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Bar Comparison: {x}", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        for idx_y, yi in enumerate(y_list):
+            row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
+            if yi not in df.columns: continue
+
+            fig.add_trace(go.Bar(
+                x=df[x], y=df[yi],
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=ds.color if not color else color,
+                opacity=ds.alpha,
+                showlegend=(idx_y == 0)
+            ), row=row, col=col)
+
+    # Final Axis formatting
+    fig.update_xaxes(title_text=xlabel or x)
+    fig.update_yaxes(title_text=ylabel or "Value")
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
     fig.show()
+    return fig
 
-# Import your plotly-based utilities from the previous step
-# from your_script import Dataset, uniplot, default_hue_palette, table_read
+def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
+                       suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                       darkmode=False, y_lim=None, return_axes=False):
+    """
+    Grouped Bar Chart version of uniplot_per_dataset.
+    Subplots are organized by Dataset.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    y_list = y if isinstance(y, list) else [y]
+    n_sets = len(active_ds)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Bar Comparison", 'x': 0.5},
+        'barmode': barmode,
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df
+        
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            
+            fig.add_trace(go.Bar(
+                x=df[x], y=df[yi],
+                name=yi,
+                legendgroup=yi,
+                marker_color=color_cycle[idx_y % len(color_cycle)],
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=x)
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
+           color=None, suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
+           darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+           y_lim=None, return_axes=False):
+    """
+    Boxplot version of uniplot.
+    Subplots are organized by Y-variables.
+    
+    Parameters:
+    - points: 'all', 'outliers', 'suspectedoutliers', or False
+    - notched: True/False (for confidence intervals)
+    """
+    y_list = y if isinstance(y, list) else [y]
+    n_y = len(y_list)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
+        nrows = int(np.ceil(n_y / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Boxplot Comparison: {x}", 'x': 0.5},
+        'boxmode': boxmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        for idx_y, yi in enumerate(y_list):
+            row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
+            if yi not in df.columns: continue
+
+            # Create Box Trace
+            fig.add_trace(go.Box(
+                x=df[x], 
+                y=df[yi],
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=ds.color if not color else color,
+                opacity=ds.alpha,
+                boxpoints=points,
+                notched=notched,
+                line=dict(width=ds.linewidth),
+                showlegend=(idx_y == 0)
+            ), row=row, col=col)
+
+    # Final Axis formatting
+    fig.update_xaxes(title_text=xlabel or x)
+    fig.update_yaxes(title_text=ylabel or "Value")
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
+                       suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                       darkmode=False, y_lim=None, return_axes=False):
+    """
+    Boxplot version of uniplot_per_dataset.
+    Subplots are organized by Dataset.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    y_list = y if isinstance(y, list) else [y]
+    n_sets = len(active_ds)
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Box Comparison", 'x': 0.5},
+        'boxmode': boxmode,
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df
+        
+        for idx_y, yi in enumerate(y_list):
+            if yi not in df.columns: continue
+            
+            fig.add_trace(go.Box(
+                x=df[x], 
+                y=df[yi],
+                name=yi,
+                legendgroup=yi,
+                marker_color=color_cycle[idx_y % len(color_cycle)],
+                boxpoints=points,
+                notched=notched,
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=x)
+    if y_lim: fig.update_yaxes(range=y_lim)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+
+def unihistogram(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                 color=None, suptitle=None, subplot_titles=None, darkmode=False, 
+                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
+    """
+    Create a unified histogram for a list of datasets.
+    Subplots are organized by Variable (x).
+    
+    Parameters:
+    - color: str, optional (Overrides dataset colors if provided)
+    """
+    x_list = x if isinstance(x, list) else [x]
+    n_x = len(x_list)
+    
+    # --- Grid Setup ---
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_x)))))
+        nrows = int(np.ceil(n_x / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_x / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_x / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or x_list)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Distribution Comparison", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    
+    fig.update_layout(**layout_args)
+
+    for ds in list_of_datasets:
+        if not ds.select: continue
+        df = ds.df.copy()
+        
+        # Use explicit color arg if provided, otherwise use the Dataset's class color
+        use_color = color if color else ds.color
+
+        for idx_x, xi in enumerate(x_list):
+            row, col = (idx_x // ncols) + 1, (idx_x % ncols) + 1
+            
+            if xi not in df.columns: continue
+
+            clean_data = df[xi].dropna()
+
+            fig.add_trace(go.Histogram(
+                x=clean_data,
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                marker_color=use_color,
+                opacity=opacity,
+                nbinsx=nbins,
+                histnorm=histnorm,
+                showlegend=(idx_x == 0)
+            ), row=row, col=col)
+
+    # Final Formatting
+    if x_lim: fig.update_xaxes(range=x_lim)
+    
+    y_label = "Density" if "density" in histnorm else "Count"
+    fig.update_yaxes(title_text=y_label)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+
+def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                            darkmode=False, x_lim=None, return_axes=False):
+    """
+    Create a unified histogram where Subplots are organized by Dataset.
+    
+    Color Logic:
+    - If plotting 1 variable: Uses the Dataset's unique color.
+    - If plotting >1 variable: Uses a color cycle (to distinguish variables), 
+      unless 'color' override is provided.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    x_list = x if isinstance(x, list) else [x]
+    n_sets = len(active_ds)
+
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    # --- Grid Setup ---
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
+    color_cycle = px.colors.qualitative.Plotly
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Dataset Distribution Analysis", 'x': 0.5},
+        'barmode': barmode,
+        'showlegend': True
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df.copy()
+        
+        for idx_x, xi in enumerate(x_list):
+            if xi not in df.columns: continue
+            
+            clean_data = df[xi].dropna()
+            
+            if color:
+                use_color = color
+            elif len(x_list) == 1:
+                use_color = ds.color
+            else:
+                use_color = color_cycle[idx_x % len(color_cycle)]
+
+            fig.add_trace(go.Histogram(
+                x=clean_data,
+                name=xi,
+                legendgroup=xi,
+                marker_color=use_color,
+                opacity=opacity,
+                nbinsx=nbins,
+                histnorm=histnorm,
+                showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+    if x_lim: fig.update_xaxes(range=x_lim)
+    
+    y_label = "Density" if "density" in histnorm else "Count"
+    fig.update_yaxes(title_text=y_label)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
 
 class UnichartNotebook:
     def __init__(self):
@@ -767,10 +1103,10 @@ class UnichartNotebook:
         self.last_y = None
         self.last_format = 'stack'
         self.last_ymult_format = 'color'
-        self.darkmode = True 
+        self.darkmode = False 
         self.last_ncols = None
         self.last_nrows = None
-        self.last_fig = None # New: Store last figure for export
+        self.last_fig = None 
 
         self.suptitle = None
         
@@ -789,29 +1125,45 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Data Management
     # ------------------------------------------------------------------
-    def load_df(self, df, title=None, set_column=None, load_cols_as_vars=False):
+    def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
         """
         Load a DataFrame into the environment as datasets.
         """
         # Auto-title logic
         if not title:
-            if set_column and set_column in df.columns:
+            if set_name_column and set_name_column in df.columns:
                 pass # Title will be derived from group
             elif "TITLE" in df.columns:
-                set_column = "TITLE"
+                set_name_column = "TITLE"
             else:
                 df["TITLE"] = "Dataset"
-                set_column = "TITLE"
-        
+                set_name_column = "TITLE"
+
+            if set_idx_column and set_idx_column in df.columns:
+                pass # Index will be derived from group
+            elif "SETNUMBER" in df.columns:
+                set_idx_column = "SETNUMBER"
+            elif "INDEX" in df.columns:
+                set_idx_column = "INDEX"
+            else:
+                df["SETNUMBER"] = df.index
+
         next_index = len(self.uset)
         
         # Group and create Dataset objects
-        if set_column and set_column in df.columns:
-            for group_name, df_subset in df.groupby(set_column):
-                # Handle cases where title might be implied
-                actual_title = title if title else str(group_name)
-                
-                ds = Dataset(df_subset.copy(), index=next_index, title=actual_title)
+        if set_idx_column and set_idx_column in df.columns:
+            for set_index, df_subset in df.groupby(set_idx_column):
+
+                if title:
+                    final_title = title
+                elif set_name_column and set_name_column in df_subset.columns:
+                    final_title = str(df_subset.iloc[0][set_name_column])
+                elif "TITLE" in df_subset.columns:
+                    final_title = str(df_subset.iloc[0]["TITLE"])
+                else:
+                    final_title = f"Group {set_index}"
+
+                ds = Dataset(df_subset.copy(), index=next_index, title=final_title)
                 self.uset.append(ds)
                 print(f"Loaded Set {next_index}: {ds.title}")
                 next_index += 1
@@ -820,10 +1172,12 @@ class UnichartNotebook:
             self.uset.append(ds)
             print(f"Loaded Set {next_index}: {ds.title}")
 
-        # If requested, inject column names as variables into the global namespace
-        # Note: In Jupyter, we have to be careful polluting global scope. 
-        # We skipped this implementation to keep the class clean, 
-        # but user can access columns via standard pandas string references.
+        if load_cols_as_vars:
+            for column in df.columns:
+                try:
+                    exec(f"{column} = '{column}'", globals())
+                except Exception as e:
+                    print(f"Could not create variable for column '{column}': {e}")
         
         self._refresh_widgets()
 
@@ -869,10 +1223,15 @@ class UnichartNotebook:
         return [uset_slice]
 
     def select(self, uset_slice=None):
+        """Select the specified dataset(s)."""
         for ds in self.uset: ds.select = False # Exclusive select logic from original
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
         self._refresh_widgets()
+
+    def selected(self):
+        """Get the currently selected datasets."""
+        return [ds for ds in self.uset if ds.select]
 
     def omit(self, uset_slice=None):
         for ds in self._get_uset_slice(uset_slice):
@@ -1187,7 +1546,224 @@ class UnichartNotebook:
 
             self.last_fig = fig
             return fig
-    
+
+
+    # ------------------------------------------------------------------
+    # The bar Command
+    # ------------------------------------------------------------------
+
+    def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None):
+        """
+        Unified interface for Bar Charts.
+        """
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
+
+        if by in ['sets', 'datasets']:
+            return unibar_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=self.axis_limits.get(y[0] if isinstance(y, list) else y)
+            )
+        else:
+            return unibar(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode
+            )
+
+    # ------------------------------------------------------------------
+    # The box Command
+    # ------------------------------------------------------------------
+
+    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
+                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
+            """
+            Unified interface for Box Plots.
+            
+            Parameters:
+            -----------
+            by : str
+                'vars' (default) - Subplots by variable (compare datasets side-by-side).
+                'sets' - Subplots by dataset (compare variables side-by-side).
+            points : str
+                'outliers' (default), 'all', 'suspectedoutliers', or False.
+            notched : bool
+                Whether to draw a notched boxplot (useful for rough confidence interval comparison).
+            color : str, optional
+                Override color for all boxes (only applies when by='vars').
+            """
+            if x is None: x = self.last_x
+            if y is None: y = self.last_y
+            self.last_x, self.last_y = x, y
+
+            # Resolve limits if they exist for the primary Y
+            primary_y = y[0] if isinstance(y, list) else y
+            y_limit = self.axis_limits.get(primary_y)
+
+            if by in ['sets', 'datasets']:
+                self.last_fig = unibox_per_dataset(
+                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                    points=points, notched=notched,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+                )
+            else:
+                self.last_fig = unibox(
+                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                    points=points, notched=notched,
+                    color=color, # <--- Added this passthrough
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+                )
+                
+            if self.last_fig:
+                self.last_fig.show()
+    # ------------------------------------------------------------------
+    # The histogram Command
+    # ------------------------------------------------------------------
+    def histogram(self, x=None, by='vars', nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+                  color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
+        """
+        Unified interface for Histograms.
+        
+        Parameters:
+        -----------
+        x : str or list
+            The column(s) to distribute.
+        by : str
+            'vars' (default) - Subplots by variable (compare datasets).
+                               Uses Dataset colors.
+            'sets'           - Subplots by dataset (compare variables).
+                               Uses Dataset color (if 1 var) or Color Cycle (if >1 var).
+        histnorm : str
+            '' (default, count), 'percent', 'probability', 'density', 'probability density'
+        color : str, optional
+            Override the color for all traces.
+        """
+        if x is None: x = self.last_x
+        self.last_x = x
+        
+        # Resolve limit
+        limit = None
+        if isinstance(x, str):
+            limit = self.axis_limits.get(x)
+        elif isinstance(x, list) and len(x) == 1:
+            limit = self.axis_limits.get(x[0])
+
+        if by in ['sets', 'datasets']:
+            self.last_fig = unihistogram_by_dataset(
+                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
+                barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
+            )
+        else:
+            self.last_fig = unihistogram(
+                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
+                barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
+            )
+            
+        if self.last_fig:
+            self.last_fig.show()
+    # ------------------------------------------------------------------
+    # The table Command
+    # ------------------------------------------------------------------
+    def table(self, cols=None, title=None):
+        """
+        Display a Plotly Table of specific columns from selected datasets.
+        
+        Parameters:
+        -----------
+        cols : str or list, optional
+            The columns to display.
+            If None, defaults to [self.last_x] + [self.last_y].
+        title : str, optional
+            Title for the table layout.
+        """
+        # 1. Resolve Columns
+        if cols is None:
+            if self.last_x is None or self.last_y is None:
+                print("No columns specified and no previous plot variables defined.")
+                return
+            
+            # Construct list from last_x and last_y (which might be a list or str)
+            y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
+            target_cols = [self.last_x] + y_part
+        else:
+            target_cols = cols if isinstance(cols, list) else [cols]
+
+        # 2. Aggregate Data from Selected Datasets
+        combined_dfs = []
+        
+        for ds in self.uset:
+            if not ds.select:
+                continue
+            
+            # Filter for existing columns only
+            valid_cols = [c for c in target_cols if c in ds.df.columns]
+            
+            if not valid_cols:
+                continue
+                
+            subset = ds.df[valid_cols].copy()
+            # Add a source column to identify the dataset
+            subset.insert(0, 'Dataset', ds.title)
+            combined_dfs.append(subset)
+
+        if not combined_dfs:
+            print("No data found for the specified columns in selected datasets.")
+            return
+
+        final_df = pd.concat(combined_dfs, ignore_index=True)
+        
+        # Fill NaNs for display purposes (optional, but looks better in tables)
+        final_df = final_df.fillna('-')
+
+        # 3. Define Styling based on Darkmode
+        if self.darkmode:
+            header_color = 'rgb(30, 30, 30)'
+            cell_color = 'rgb(50, 50, 50)'
+            font_color = 'white'
+            line_color = 'rgb(70, 70, 70)'
+        else:
+            header_color = 'rgb(230, 230, 230)'
+            cell_color = 'white'
+            font_color = 'black'
+            line_color = 'rgb(200, 200, 200)'
+
+        # 4. Create Plotly Table
+        fig = go.Figure(data=[go.Table(
+            header=dict(
+                values=list(final_df.columns),
+                fill_color=header_color,
+                align='left',
+                font=dict(color=font_color, size=12, weight='bold'),
+                line_color=line_color
+            ),
+            cells=dict(
+                values=[final_df[k].tolist() for k in final_df.columns],
+                fill_color=cell_color,
+                align='left',
+                font=dict(color=font_color, size=11),
+                line_color=line_color,
+                height=25
+            )
+        )])
+
+        # Layout updates
+        layout_args = {
+            'title': {'text': title or "Data Table", 'x': 0.5},
+            'template': "plotly_dark" if self.darkmode else "plotly_white",
+            'margin': dict(l=20, r=20, t=50, b=20),
+        }
+        fig.update_layout(**layout_args)
+        
+        fig.show()
+
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
         Save the last generated plot to a PNG file.
@@ -1253,6 +1829,78 @@ class UnichartNotebook:
 
         print("\nLoaded Datasets:")
         print("\n".join(output_lines))
+
+    def list_parms(self, set_number=None, search_string=None, use_regex=False):
+            """
+            List the parameters (columns) available in the loaded datasets.
+            
+            Parameters:
+            -----------
+            set_number : int, list, 'all', or None, optional
+                The specific dataset index to inspect.
+            search_string : str, optional
+                A substring or wildcard to filter the parameter names (case-insensitive).
+                By default, supports standard wildcards (e.g., 'T*', '*temp*').
+            use_regex : bool, optional
+                If True, treats the search_string as a strict regular expression.
+                
+            Returns:
+            --------
+            list
+                A sorted list of matching parameter (column) names.
+            """
+            import fnmatch # Ensure this is imported at the top of your file
+            
+            if set_number is None:
+                target_sets = self.selected()
+                if not target_sets:
+                    target_sets = self.uset
+            else:
+                target_sets = self._get_uset_slice(set_number)
+                
+            if not target_sets:
+                print("No datasets available to list parameters from.")
+                return []
+                
+            all_cols = set()
+            for ds in target_sets:
+                all_cols.update(ds.df.columns)
+                
+            if search_string:
+                try:
+                    if not use_regex:
+                        # Translate standard wildcards (T*) to regex implicitly
+                        # Adding * around the string if no wildcards are present makes it act like a standard substring search
+                        if not any(c in search_string for c in ['*', '?', '[', ']']):
+                            search_string = f"*{search_string}*"
+                        
+                        pattern_str = fnmatch.translate(search_string)
+                    else:
+                        pattern_str = search_string
+                        
+                    pattern = re.compile(pattern_str, re.IGNORECASE)
+                    filtered_cols = [col for col in all_cols if pattern.search(str(col))]
+                    
+                except re.error as e:
+                    print(f"Invalid search pattern '{search_string}': {e}")
+                    return []
+            else:
+                filtered_cols = list(all_cols)
+                
+            filtered_cols.sort(key=lambda x: str(x).lower())
+            
+            print(f"Found {len(filtered_cols)} parameters", end="")
+            if search_string:
+                print(f" matching '{search_string}'", end="")
+            if set_number is not None:
+                print(f" in set(s) {set_number}:")
+            else:
+                print(" in active datasets:")
+                
+            for col in filtered_cols:
+                print(f"  - {col}")
+                
+            return filtered_cols
 
     def help(self):
         """
