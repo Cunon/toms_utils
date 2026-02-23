@@ -430,7 +430,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             def get_cd_idx(col_name):
                 return custom_data_cols.index(col_name)
 
-            ht = f"<b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
+            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
             for parm in hover_cols:
                 # Check if the column is numeric to apply 5 sig fig formatting
                 if pd.api.types.is_numeric_dtype(df[parm]):
@@ -1141,19 +1141,19 @@ class UnichartNotebook:
 
             if set_idx_column and set_idx_column in df.columns:
                 pass # Index will be derived from group
-            elif "SET_NUMBER" in df.columns:
-                set_idx_column = "SET_NUMBER"
+            elif "SETNUMBER" in df.columns:
+                set_idx_column = "SETNUMBER"
             elif "INDEX" in df.columns:
                 set_idx_column = "INDEX"
             else:
-                df["SET_NUMBER"] = df.index
+                df["SETNUMBER"] = df.index
 
         next_index = len(self.uset)
         
         # Group and create Dataset objects
         if set_idx_column and set_idx_column in df.columns:
-            for set_idx, df_subset in df.groupby(set_idx_column):
-                
+            for set_index, df_subset in df.groupby(set_idx_column):
+
                 if title:
                     final_title = title
                 elif set_name_column and set_name_column in df_subset.columns:
@@ -1161,8 +1161,8 @@ class UnichartNotebook:
                 elif "TITLE" in df_subset.columns:
                     final_title = str(df_subset.iloc[0]["TITLE"])
                 else:
-                    final_title = f"Group {set_idx}"
-                
+                    final_title = f"Group {set_index}"
+
                 ds = Dataset(df_subset.copy(), index=next_index, title=final_title)
                 self.uset.append(ds)
                 print(f"Loaded Set {next_index}: {ds.title}")
@@ -1829,6 +1829,78 @@ class UnichartNotebook:
 
         print("\nLoaded Datasets:")
         print("\n".join(output_lines))
+
+    def list_parms(self, set_number=None, search_string=None, use_regex=False):
+            """
+            List the parameters (columns) available in the loaded datasets.
+            
+            Parameters:
+            -----------
+            set_number : int, list, 'all', or None, optional
+                The specific dataset index to inspect.
+            search_string : str, optional
+                A substring or wildcard to filter the parameter names (case-insensitive).
+                By default, supports standard wildcards (e.g., 'T*', '*temp*').
+            use_regex : bool, optional
+                If True, treats the search_string as a strict regular expression.
+                
+            Returns:
+            --------
+            list
+                A sorted list of matching parameter (column) names.
+            """
+            import fnmatch # Ensure this is imported at the top of your file
+            
+            if set_number is None:
+                target_sets = self.selected()
+                if not target_sets:
+                    target_sets = self.uset
+            else:
+                target_sets = self._get_uset_slice(set_number)
+                
+            if not target_sets:
+                print("No datasets available to list parameters from.")
+                return []
+                
+            all_cols = set()
+            for ds in target_sets:
+                all_cols.update(ds.df.columns)
+                
+            if search_string:
+                try:
+                    if not use_regex:
+                        # Translate standard wildcards (T*) to regex implicitly
+                        # Adding * around the string if no wildcards are present makes it act like a standard substring search
+                        if not any(c in search_string for c in ['*', '?', '[', ']']):
+                            search_string = f"*{search_string}*"
+                        
+                        pattern_str = fnmatch.translate(search_string)
+                    else:
+                        pattern_str = search_string
+                        
+                    pattern = re.compile(pattern_str, re.IGNORECASE)
+                    filtered_cols = [col for col in all_cols if pattern.search(str(col))]
+                    
+                except re.error as e:
+                    print(f"Invalid search pattern '{search_string}': {e}")
+                    return []
+            else:
+                filtered_cols = list(all_cols)
+                
+            filtered_cols.sort(key=lambda x: str(x).lower())
+            
+            print(f"Found {len(filtered_cols)} parameters", end="")
+            if search_string:
+                print(f" matching '{search_string}'", end="")
+            if set_number is not None:
+                print(f" in set(s) {set_number}:")
+            else:
+                print(" in active datasets:")
+                
+            for col in filtered_cols:
+                print(f"  - {col}")
+                
+            return filtered_cols
 
     def help(self):
         """
