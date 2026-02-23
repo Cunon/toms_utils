@@ -1119,6 +1119,8 @@ class UnichartNotebook:
         self.axis_limits = {} 
         self.lines = {}       
         self.highlights = {}  
+
+        self.parm_description_dict = {}
         
         print("UniChart Notebook Environment Initialized.")
 
@@ -1833,14 +1835,14 @@ class UnichartNotebook:
     def list_parms(self, set_number=None, search_string=None, use_regex=False):
             """
             List the parameters (columns) available in the loaded datasets.
+            Includes descriptions if available in self.parm_description_dict.
             
             Parameters:
             -----------
             set_number : int, list, 'all', or None, optional
                 The specific dataset index to inspect.
             search_string : str, optional
-                A substring or wildcard to filter the parameter names (case-insensitive).
-                By default, supports standard wildcards (e.g., 'T*', '*temp*').
+                A substring or wildcard to filter the parameter names.
             use_regex : bool, optional
                 If True, treats the search_string as a strict regular expression.
                 
@@ -1849,7 +1851,7 @@ class UnichartNotebook:
             list
                 A sorted list of matching parameter (column) names.
             """
-            import fnmatch # Ensure this is imported at the top of your file
+            import fnmatch
             
             if set_number is None:
                 target_sets = self.selected()
@@ -1869,11 +1871,8 @@ class UnichartNotebook:
             if search_string:
                 try:
                     if not use_regex:
-                        # Translate standard wildcards (T*) to regex implicitly
-                        # Adding * around the string if no wildcards are present makes it act like a standard substring search
                         if not any(c in search_string for c in ['*', '?', '[', ']']):
                             search_string = f"*{search_string}*"
-                        
                         pattern_str = fnmatch.translate(search_string)
                     else:
                         pattern_str = search_string
@@ -1897,8 +1896,10 @@ class UnichartNotebook:
             else:
                 print(" in active datasets:")
                 
+            # --- MODIFIED OUTPUT LOGIC ---
             for col in filtered_cols:
-                print(f"  - {col}")
+                desc = self.parm_description_dict.get(col, "No description available.")
+                print(f"  - {str(col).ljust(25)} : {desc}")
                 
             return filtered_cols
 
