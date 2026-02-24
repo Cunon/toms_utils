@@ -1434,7 +1434,7 @@ class UnichartNotebook:
     # Main Plot Function
     # ------------------------------------------------------------------
     def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None, 
-                subplot_titles=None, suptitle=None, **kwargs):
+                subplot_titles=None, suptitle=None, suppress_legends=False, **kwargs):
             """
             Main plotting wrapper.
             
@@ -1582,15 +1582,17 @@ class UnichartNotebook:
                         fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
             fig = self._apply_fonts(fig)
+            if fig and suppress_legends:
+                fig.update_traces(visible='legendonly') 
             self.last_fig = fig
             return fig
 
 
-    # ------------------------------------------------------------------
+# ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
 
-    def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None):
+    def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
         """
@@ -1599,24 +1601,31 @@ class UnichartNotebook:
         self.last_x, self.last_y = x, y
 
         if by in ['sets', 'datasets']:
-            return unibar_per_dataset(
+            fig = unibar_per_dataset(
                 list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, y_lim=self.axis_limits.get(y[0] if isinstance(y, list) else y)
+                darkmode=self.darkmode, y_lim=self.axis_limits.get(y[0] if isinstance(y, list) else y),
+                return_axes=True # Added to suppress immediate showing
             )
         else:
-            return unibar(
+            fig = unibar(
                 list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode
+                darkmode=self.darkmode, return_axes=True # Added to suppress immediate showing
             )
+            
+        fig = self._apply_fonts(fig)
+        if fig and suppress_legends:
+            fig.update_traces(visible='legendonly')
+        self.last_fig = fig
+        return fig
 
     # ------------------------------------------------------------------
     # The box Command
     # ------------------------------------------------------------------
 
     def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
-                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
+                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
             Unified interface for Box Plots.
             
@@ -1641,30 +1650,33 @@ class UnichartNotebook:
             y_limit = self.axis_limits.get(primary_y)
 
             if by in ['sets', 'datasets']:
-                self.last_fig = unibox_per_dataset(
+                fig = unibox_per_dataset(
                     list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
                     points=points, notched=notched,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                     darkmode=self.darkmode, y_lim=y_limit, return_axes=True
                 )
             else:
-                self.last_fig = unibox(
+                fig = unibox(
                     list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
                     points=points, notched=notched,
-                    color=color, # <--- Added this passthrough
+                    color=color,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                     darkmode=self.darkmode, y_lim=y_limit, return_axes=True
                 )
+            
+            # Fixed UnboundLocalError here
             fig = self._apply_fonts(fig)
+            if fig and suppress_legends:
+                fig.update_traces(visible='legendonly')
             self.last_fig = fig
-            if self.last_fig:
-                self.last_fig.show()
+            return fig
                 
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
     def histogram(self, x=None, by='vars', nbins=None, histnorm='', barmode='overlay', opacity=0.7,
-                  color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None):
+                  color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Histograms.
         
@@ -1693,23 +1705,25 @@ class UnichartNotebook:
             limit = self.axis_limits.get(x[0])
 
         if by in ['sets', 'datasets']:
-            self.last_fig = unihistogram_by_dataset(
+            fig = unihistogram_by_dataset(
                 list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
                 barmode=barmode, opacity=opacity, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
         else:
-            self.last_fig = unihistogram(
+            fig = unihistogram(
                 list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
                 barmode=barmode, opacity=opacity, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
+            
         fig = self._apply_fonts(fig)
+        if fig and suppress_legends:
+            fig.update_traces(visible='legendonly')
         self.last_fig = fig
-        if self.last_fig:
-            self.last_fig.show()
+        return fig
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
