@@ -1121,6 +1121,11 @@ class UnichartNotebook:
         self.highlights = {}  
 
         self.parm_description_dict = {}
+
+        self.suptitle_size = None
+        self.legend_size = None
+        self.axes_title_size = None
+        self.axes_tick_size = None
         
         print("UniChart Notebook Environment Initialized.")
 
@@ -1344,7 +1349,7 @@ class UnichartNotebook:
             self.uset[-1].settype = 'delta'
 
     # ------------------------------------------------------------------
-    # Decorations (Lines/Highlights)
+    # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
     def line(self, column, level, color='red', dash='dash'):
         """Add a vertical or horizontal line to the next plot."""
@@ -1363,10 +1368,7 @@ class UnichartNotebook:
             
         if column not in self.highlights: self.highlights[column] = []
         self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
-
-    # ------------------------------------------------------------------
-    # Decorations (Lines/Highlights)
-    # ------------------------------------------------------------------
+        
     def scale(self, column, range_tuple):
             """
             Set specific axis limits for a parameter.
@@ -1393,9 +1395,43 @@ class UnichartNotebook:
                     print(f"Limits set for '{column}': {range_tuple}")
                 else:
                     raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
-
     # ------------------------------------------------------------------
-    # The Plot Command
+    # Font Management
+    # ------------------------------------------------------------------
+    def set_font_sizes(self, suptitle=None, legend=None, axes_title=None, axes_tick=None):
+        """Set independent font sizes for various plot elements."""
+        if suptitle is not None: self.suptitle_size = suptitle
+        if legend is not None: self.legend_size = legend
+        if axes_title is not None: self.axes_title_size = axes_title
+        if axes_tick is not None: self.axes_tick_size = axes_tick
+
+    def _apply_fonts(self, fig):
+        """Internal method to apply stored font sizes to a Plotly figure."""
+        if fig is None: return fig
+        
+        layout_updates = {}
+        if self.suptitle_size:
+            layout_updates['title_font'] = dict(size=self.suptitle_size)
+        if self.legend_size:
+            layout_updates['legend'] = dict(font=dict(size=self.legend_size))
+        
+        if layout_updates:
+            fig.update_layout(**layout_updates)
+            
+        x_updates, y_updates = {}, {}
+        if self.axes_title_size:
+            x_updates['title_font'] = dict(size=self.axes_title_size)
+            y_updates['title_font'] = dict(size=self.axes_title_size)
+        if self.axes_tick_size:
+            x_updates['tickfont'] = dict(size=self.axes_tick_size)
+            y_updates['tickfont'] = dict(size=self.axes_tick_size)
+            
+        if x_updates: fig.update_xaxes(**x_updates)
+        if y_updates: fig.update_yaxes(**y_updates)
+        
+        return fig
+    # ------------------------------------------------------------------
+    # Main Plot Function
     # ------------------------------------------------------------------
     def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None, 
                 subplot_titles=None, suptitle=None, **kwargs):
@@ -1538,7 +1574,6 @@ class UnichartNotebook:
                 fig.update_xaxes(range=self.axis_limits[x])
 
             # Y limits
-            # CHANGE: Only apply post-hoc limits if we are in 'vars' mode. 
             # In 'sets' mode, limits were already applied inside uniplot_per_dataset.
             if mode == 'vars':
                 for idx, yi in enumerate(y_list):
@@ -1546,6 +1581,7 @@ class UnichartNotebook:
                         r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
                         fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
+            fig = self._apply_fonts(fig)
             self.last_fig = fig
             return fig
 
@@ -1619,9 +1655,11 @@ class UnichartNotebook:
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                     darkmode=self.darkmode, y_lim=y_limit, return_axes=True
                 )
-                
+            fig = self._apply_fonts(fig)
+            self.last_fig = fig
             if self.last_fig:
                 self.last_fig.show()
+                
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
@@ -1668,7 +1706,8 @@ class UnichartNotebook:
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
-            
+        fig = self._apply_fonts(fig)
+        self.last_fig = fig
         if self.last_fig:
             self.last_fig.show()
     # ------------------------------------------------------------------
