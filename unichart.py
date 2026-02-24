@@ -486,17 +486,14 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                     opacity=0.7, hoverinfo='skip', showlegend=False
                 ), row=row, col=col)
 
-    # --- AXIS CONFIGURATION (FIXED) ---
     for idx_y, yi in enumerate(y_list):
         row = idx_y // ncols + 1
         col = idx_y % ncols + 1
         
         axis_title = ylabel if ylabel else yi
-        # NEW: Explicitly define x-axis title for this subplot
         x_axis_title = xlabel if xlabel else x
         
         fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
-        # NEW: Added title_text=x_axis_title to update_xaxes
         fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
 
     # Global Axis Limits
@@ -1474,7 +1471,7 @@ class UnichartNotebook:
                     darkmode=self.darkmode,
                     x_lim=self.axis_limits.get(x),
                     y_lim=None, 
-                    axis_limits=self.axis_limits,  # <--- NEW ARGUMENT
+                    axis_limits=self.axis_limits, 
                     return_axes=True 
                 )
                 # Set flag for decoration logic
@@ -1568,7 +1565,6 @@ class UnichartNotebook:
                             apply_to_all_subplots(fig.add_hrect, y0=h['range'][0], y1=h['range'][1], 
                                                 fillcolor=h['color'], opacity=h['opacity'], layer="below", line_width=0)
 
-            # --- LIMITS (UPDATED) ---
             # X limits
             if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
