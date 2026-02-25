@@ -11,6 +11,7 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 import re
 import inspect
+from scipy.interpolate import griddata
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -54,6 +55,31 @@ def validate_linestyle(value):
 def marker_map(index):
     markers = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
     return markers[index % len(markers)]
+
+def _generate_contour_grid(x_data, y_data, z_data, res=100, method='linear'):
+    """
+    Interpolates scattered x, y, z data into a uniform 2D grid for contour plotting.
+    Leaves data outside the convex hull as NaN.
+    """
+    # Filter out any rows where x, y, or z are NaN
+    valid = ~(np.isnan(x_data) | np.isnan(y_data) | np.isnan(z_data))
+    x_val = x_data[valid]
+    y_val = y_data[valid]
+    z_val = z_data[valid]
+
+    # Failsafe for insufficient data
+    if len(x_val) < 4:
+        return x_val.values, y_val.values, z_val.values
+
+    # Create uniform grid axes
+    xi = np.linspace(x_val.min(), x_val.max(), res)
+    yi = np.linspace(y_val.min(), y_val.max(), res)
+    xi_grid, yi_grid = np.meshgrid(xi, yi)
+
+    # Interpolate Z values onto the grid
+    zi_grid = griddata((x_val, y_val), z_val, (xi_grid, yi_grid), method=method)
+
+    return xi, yi, zi_grid
 
 # -----------------------------------------------------------------------------
 # Dataset Class
@@ -1087,6 +1113,209 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
     fig.show()
     return fig
 
+def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
+               interpolate=True, interp_res=100, interp_method='linear',
+               suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
+               darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+               axis_limits=None, return_axes=False):
+    """
+    Create a unified contour plot for a list of datasets.
+    Subplots are organized by Z-variables.
+    """
+    z_list = z if isinstance(z, list) else [z]
+    n_z = len(z_list)
+    active_ds = [d for d in list_of_datasets if d.select]
+    axis_limits = axis_limits or {}
+
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_z)))))
+        nrows = int(np.ceil(n_z / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_z / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_z / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or z_list, horizontal_spacing=0.15)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {
+            'text': suptitle or f"Contour: {y} vs {x}",
+            'x': 0.5, 'xanchor': 'center',
+            'y': 0.98, 'yanchor': 'top', 'yref': 'container'
+        },
+        'showlegend': True,
+        'margin': dict(r=100) 
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        df = ds.df.copy()
+        if x not in df.columns or y not in df.columns: 
+            continue
+
+        for idx_z, zi in enumerate(z_list):
+            if zi not in df.columns: continue
+            row, col = (idx_z // ncols) + 1, (idx_z % ncols) + 1
+
+            use_coloring = 'lines' if len(active_ds) > 1 and contours_coloring == 'fill' else contours_coloring
+
+            clean_df = df.dropna(subset=[x, y, zi])
+            if clean_df.empty: continue
+
+            if interpolate:
+                plot_x, plot_y, plot_z = _generate_contour_grid(
+                    clean_df[x], clean_df[y], clean_df[zi], 
+                    res=interp_res, method=interp_method
+                )
+            else:
+                plot_x, plot_y, plot_z = clean_df[x], clean_df[y], clean_df[zi]
+
+            # Resolve Z-limits for color scaling
+            z_lim = axis_limits.get(zi)
+            zmin, zmax = z_lim if z_lim else (None, None)
+
+            subplot_idx = (row - 1) * ncols + col
+            x_axis_name = f"xaxis{subplot_idx}" if subplot_idx > 1 else "xaxis"
+            y_axis_name = f"yaxis{subplot_idx}" if subplot_idx > 1 else "yaxis"
+            
+            try:
+                x_domain = fig.layout[x_axis_name].domain
+                y_domain = fig.layout[y_axis_name].domain
+                cb_x = x_domain[1] + 0.01               
+                cb_y = sum(y_domain) / 2                
+                cb_len = y_domain[1] - y_domain[0]      
+            except KeyError:
+                cb_x, cb_y, cb_len = 1.02, 0.5, 1.0     
+
+            fig.add_trace(go.Contour(
+                x=plot_x, y=plot_y, z=plot_z,
+                zmin=zmin, zmax=zmax,  # Apply limits directly to the color scale
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"group_{ds.index}",
+                colorscale=colorscale or ds.hue_palette,
+                contours_coloring=use_coloring,
+                line=dict(width=ds.linewidth, color=ds.color if use_coloring=='lines' else None),
+                showscale=(idx_ds == 0), 
+                colorbar=dict(
+                    title=zi,
+                    x=cb_x,
+                    y=cb_y,
+                    len=cb_len,
+                    thickness=15
+                ),
+                hovertemplate=f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>{zi}: %{{z:.3g}}<extra></extra>"
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=xlabel or x)
+    fig.update_yaxes(title_text=ylabel or y)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+
+def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
+                           interpolate=True, interp_res=100, interp_method='linear',
+                           suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                           darkmode=False, axis_limits=None, return_axes=False):
+    """
+    Contour plot where Subplots are organized by Dataset.
+    """
+    active_ds = [d for d in list_of_datasets if d.select]
+    z_list = z if isinstance(z, list) else [z]
+    n_sets = len(active_ds)
+    axis_limits = axis_limits or {}
+
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
+        nrows = int(np.ceil(n_sets / ncols))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds], horizontal_spacing=0.15)
+
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Dataset Contour Comparison", 'x': 0.5, 'y': 0.98, 'yref': 'container'},
+        'margin': dict(r=100)
+    }
+    if figsize:
+        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
+    fig.update_layout(**layout_args)
+
+    for idx_ds, ds in enumerate(active_ds):
+        row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
+        df = ds.df.copy()
+        
+        if x not in df.columns or y not in df.columns: continue
+
+        for idx_z, zi in enumerate(z_list):
+            if zi not in df.columns: continue
+            
+            use_coloring = 'lines' if len(z_list) > 1 and contours_coloring == 'fill' else contours_coloring
+
+            clean_df = df.dropna(subset=[x, y, zi])
+            if clean_df.empty: continue
+
+            if interpolate:
+                plot_x, plot_y, plot_z = _generate_contour_grid(
+                    clean_df[x], clean_df[y], clean_df[zi], 
+                    res=interp_res, method=interp_method
+                )
+            else:
+                plot_x, plot_y, plot_z = clean_df[x], clean_df[y], clean_df[zi]
+
+            # Resolve Z-limits for color scaling
+            z_lim = axis_limits.get(zi)
+            zmin, zmax = z_lim if z_lim else (None, None)
+
+            subplot_idx = (row - 1) * ncols + col
+            x_axis_name = f"xaxis{subplot_idx}" if subplot_idx > 1 else "xaxis"
+            y_axis_name = f"yaxis{subplot_idx}" if subplot_idx > 1 else "yaxis"
+            
+            try:
+                x_domain = fig.layout[x_axis_name].domain
+                y_domain = fig.layout[y_axis_name].domain
+                cb_x = x_domain[1] + 0.01 + (idx_z * 0.05) 
+                cb_y = sum(y_domain) / 2
+                cb_len = y_domain[1] - y_domain[0]
+            except KeyError:
+                cb_x, cb_y, cb_len = 1.02 + (idx_z * 0.05), 0.5, 1.0
+
+            fig.add_trace(go.Contour(
+                x=plot_x, y=plot_y, z=plot_z,
+                zmin=zmin, zmax=zmax,  # Apply limits directly to the color scale
+                name=zi,
+                legendgroup=zi,
+                colorscale=colorscale or ds.hue_palette,
+                contours_coloring=use_coloring,
+                showscale=(idx_ds == 0), 
+                colorbar=dict(
+                    title=zi,
+                    x=cb_x,
+                    y=cb_y,
+                    len=cb_len,
+                    thickness=15
+                ),
+                hovertemplate=f"<b>{zi}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>Value: %{{z:.3g}}<extra></extra>"
+            ), row=row, col=col)
+
+    fig.update_xaxes(title_text=x)
+    fig.update_yaxes(title_text=y)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
 class UnichartNotebook:
     def __init__(self):
         """
@@ -1271,6 +1500,11 @@ class UnichartNotebook:
     def markersize(self, uset_slice, size_val):
         for ds in self._get_uset_slice(uset_slice):
             ds.markersize = size_val
+    
+    def linewidth(self, uset_slice, width_val):
+        """Set the line thickness for the specified dataset(s)."""
+        for ds in self._get_uset_slice(uset_slice):
+            ds.linewidth = width_val
 
     def hue(self, uset_slice, col_name):
         for ds in self._get_uset_slice(uset_slice):
@@ -1720,6 +1954,70 @@ class UnichartNotebook:
             fig.update_traces(visible='legendonly')
         self.last_fig = fig
         return fig
+
+    def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
+                    colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
+                    suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+            """
+            Unified interface for Contour Plots.
+            
+            Parameters:
+            -----------
+            x : str
+                The X-axis variable (e.g., 'Mach')
+            y : str
+                The Y-axis variable (e.g., 'Altitude')
+            z : str or list
+                The variable(s) to color the contour by (e.g., 'T4F')
+            by : str
+                'vars' (default) - Subplots by Z-variable.
+                'sets'           - Subplots by dataset.
+            interpolate : bool
+                If True, uses scipy.griddata to mesh scattered x/y points.
+            interp_res : int
+                The resolution of the interpolation grid (default 100x100).
+            suptitle : str, optional
+                A title for the entire figure.
+            """
+            if x is None: x = self.last_x
+            if y is None: y = self.last_y
+            self.last_x, self.last_y = x, y
+
+            if z is None:
+                print("Error: Contour plots require a 'z' variable to map to color.")
+                return
+
+            limit_x = self.axis_limits.get(x)
+            limit_y = self.axis_limits.get(y)
+
+            if by in ['sets', 'datasets']:
+                fig = unicontour_per_dataset(
+                    list_of_datasets=self.uset, x=x, y=y, z=z, 
+                    contours_coloring=contours_coloring, colorscale=colorscale,
+                    interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+                )
+            else:
+                fig = unicontour(
+                    list_of_datasets=self.uset, x=x, y=y, z=z,
+                    contours_coloring=contours_coloring, colorscale=colorscale,
+                    interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+                )
+                
+            if fig:
+                if limit_x: fig.update_xaxes(range=limit_x)
+                if limit_y: fig.update_yaxes(range=limit_y)
+                fig = self._apply_fonts(fig)
+                if suppress_legends:
+                    fig.update_traces(visible='legendonly')
+                self.last_fig = fig
+                fig.show()
+                
+            return fig
+
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
@@ -1951,6 +2249,95 @@ class UnichartNotebook:
                 print(f"  - {str(col).ljust(25)} : {desc}")
                 
             return filtered_cols
+
+    def summary(self, cols=None):
+            """
+            Print a formatted statistical summary table for specific columns
+            across all selected datasets, noting any applied queries.
+
+            Parameters:
+            -----------
+            cols : str or list, optional
+                The columns to summarize. If None, defaults to the last plotted x and y variables.
+            """
+            # 1. Resolve Columns
+            if cols is None:
+                y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
+                x_part = [self.last_x] if self.last_x else []
+                target_cols = x_part + y_part
+            else:
+                target_cols = cols if isinstance(cols, list) else [cols]
+
+            if not target_cols:
+                print("No columns specified and no previous plot variables defined.")
+                return
+
+            active_ds = self.selected()
+            if not active_ds:
+                print("No datasets selected. Cannot generate summary.")
+                return
+
+            # 2. Gather Data
+            rows = []
+            for ds in active_ds:
+                # Format the query string for display
+                if ds.query:
+                    q_str = str(ds.query)
+                    query_disp = (q_str[:27] + '...') if len(q_str) > 30 else q_str
+                else:
+                    query_disp = "-"
+
+                for col in target_cols:
+                    if col in ds.df.columns:
+                        data = ds.df[col].dropna()
+                        
+                        if data.empty:
+                            rows.append([
+                                f"Set {ds.index}", str(ds.title)[:20], query_disp, 
+                                str(col)[:15], "0", "-", "-", "-", "-"
+                            ])
+                        elif pd.api.types.is_numeric_dtype(data):
+                            count = len(data)
+                            vmin = data.min()
+                            vmean = data.mean()
+                            vmax = data.max()
+                            vstd = data.std()
+                            
+                            rows.append([
+                                f"Set {ds.index}",
+                                str(ds.title)[:20],
+                                query_disp,
+                                str(col)[:15],
+                                f"{count}",
+                                f"{vmin:.4g}",
+                                f"{vmean:.4g}",
+                                f"{vmax:.4g}",
+                                f"{vstd:.4g}" if pd.notna(vstd) else "-"
+                            ])
+                        else:
+                            rows.append([
+                                f"Set {ds.index}", str(ds.title)[:20], query_disp, 
+                                str(col)[:15], f"{len(data)}", "Non-numeric", "-", "-", "-"
+                            ])
+
+            if not rows:
+                print(f"None of the selected datasets contain the specified columns: {target_cols}")
+                return
+
+            # 3. Format and Print Table
+            headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
+            
+            # Calculate column widths with 2 spaces padding
+            col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + rows))]
+
+            header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
+            sep = "-" * sum(col_widths)
+
+            print(f"\nStatistical Summary for: {', '.join(target_cols)}")
+            print(header_str)
+            print(sep)
+            for row in rows:
+                print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
 
     def help(self):
         """
