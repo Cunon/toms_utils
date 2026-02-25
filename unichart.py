@@ -1818,37 +1818,71 @@ class UnichartNotebook:
             return fig
 
 
-# ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-
     def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-        """
-        Unified interface for Bar Charts.
-        """
-        if x is None: x = self.last_x
-        if y is None: y = self.last_y
-        self.last_x, self.last_y = x, y
+            """
+            Unified interface for Bar Charts.
+            Incorporates the scale method (self.axis_limits) for individual axes.
+            """
+            if x is None: x = self.last_x
+            if y is None: y = self.last_y
+            self.last_x, self.last_y = x, y
 
-        if by in ['sets', 'datasets']:
-            fig = unibar_per_dataset(
-                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, y_lim=self.axis_limits.get(y[0] if isinstance(y, list) else y),
-                return_axes=True # Added to suppress immediate showing
-            )
-        else:
-            fig = unibar(
-                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, return_axes=True # Added to suppress immediate showing
-            )
-            
-        fig = self._apply_fonts(fig)
-        if fig and suppress_legends:
-            fig.update_traces(visible='legendonly')
-        self.last_fig = fig
-        return fig
+            y_list = y if isinstance(y, list) else [y]
+
+            if by in ['sets', 'datasets']:
+                fig = unibar_per_dataset(
+                    list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                    suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, return_axes=True # Generate figure but don't show yet
+                )
+            else:
+                fig = unibar(
+                    list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                    suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, return_axes=True # Generate figure but don't show yet
+                )
+                
+            if fig:
+                # 1. Apply global X-axis limits
+                if x in self.axis_limits:
+                    fig.update_xaxes(range=self.axis_limits[x])
+
+                # 2. Grid calculation to apply specific Y limits
+                active_sets = [d for d in self.uset if d.select]
+                n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
+                
+                calc_ncols = ncols
+                if calc_ncols is None and nrows is None:
+                    calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
+                elif calc_ncols is None:
+                    calc_ncols = int(np.ceil(n_items / nrows))
+                calc_ncols = max(1, calc_ncols)
+
+                # 3. Apply Y-axis limits
+                if by in ['sets', 'datasets']:
+                    # 'sets' mode: subplots are datasets. They all share the same Y variables.
+                    # Apply the limit of the primary Y variable to all subplots.
+                    primary_y = y_list[0]
+                    if primary_y in self.axis_limits:
+                        fig.update_yaxes(range=self.axis_limits[primary_y])
+                else:
+                    # 'vars' mode: subplots are distinct Y variables. Apply limits individually.
+                    for idx, yi in enumerate(y_list):
+                        if yi in self.axis_limits:
+                            r = (idx // calc_ncols) + 1
+                            c = (idx % calc_ncols) + 1
+                            fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+
+                # 4. Final Polish
+                fig = self._apply_fonts(fig)
+                if suppress_legends:
+                    fig.update_traces(visible='legendonly')
+                self.last_fig = fig
+                
+            return fig
 
     # ------------------------------------------------------------------
     # The box Command
