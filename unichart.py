@@ -1316,6 +1316,217 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
     fig.show()
     return fig
 
+def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmode=False,
+                         figsize=(12, 8), axis_limits=None, return_axes=False):
+    """
+    Creates a single grouped bar chart where the X-axis is the Dataset name,
+    and the bars are the different Y-variables, each scaled to their own Y-axis.
+    Includes an 'agg' parameter to handle multi-row datasets.
+    """
+    import plotly.graph_objects as go
+    import plotly.express as px
+
+    active_ds = [d for d in list_of_datasets if d.select]
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    y_list = y if isinstance(y, list) else [y]
+    axis_limits = axis_limits or {}
+    color_cycle = px.colors.qualitative.Plotly
+
+    fig = go.Figure()
+
+    # 1. Setup X-Axis Categories
+    x_labels = [f"{ds.index}: {ds.title}" for ds in active_ds]
+
+    # 2. Domain Management for Extra Y-Axes
+    extras_count = max(0, len(y_list) - 2)
+    width_per_axis = 0.08
+    required_space = extras_count * width_per_axis
+    x_domain_end = max(0.5, 1.0 - required_space) 
+
+    # 3. Add Traces and Axes
+    for idx_y, yi in enumerate(y_list):
+        var_color = color_cycle[idx_y % len(color_cycle)]
+
+        # Extract data with the chosen aggregation method
+        y_data = []
+        for ds in active_ds:
+            if yi in ds.df.columns:
+                valid_data = ds.df[yi].dropna()
+                if valid_data.empty:
+                    val = None
+                elif agg == 'mean': val = valid_data.mean()
+                elif agg == 'sum': val = valid_data.sum()
+                elif agg == 'max': val = valid_data.max()
+                elif agg == 'min': val = valid_data.min()
+                elif agg == 'median': val = valid_data.median()
+                elif agg == 'first': val = valid_data.iloc[0]
+                elif agg == 'last': val = valid_data.iloc[-1]
+                else:
+                    print(f"Warning: Unknown agg '{agg}', defaulting to mean.")
+                    val = valid_data.mean()
+                y_data.append(val)
+            else:
+                y_data.append(None)
+
+        y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
+
+        # Add the Bar Trace
+        fig.add_trace(go.Bar(
+            name=yi,
+            x=x_labels,
+            y=y_data,
+            yaxis=y_axis_name,
+            offsetgroup=str(idx_y), # Forces grouping across multiple Y-axes
+            marker_color=var_color
+        ))
+
+        # Configure the Layout for this Axis
+        axis_layout = dict(
+            title=yi,
+            title_font=dict(color=var_color),
+            tickfont=dict(color=var_color),
+            showgrid=(idx_y == 0) 
+        )
+
+        if yi in axis_limits:
+            axis_layout['range'] = axis_limits[yi]
+
+        # Anchor logic for positioning axes
+        if idx_y == 0:
+            fig.update_layout(yaxis=axis_layout)
+        elif idx_y == 1:
+            axis_layout.update(dict(overlaying='y', side='right', anchor='x'))
+            fig.update_layout(yaxis2=axis_layout)
+        else:
+            pos = x_domain_end + ((idx_y - 1) * width_per_axis)
+            axis_layout.update(dict(overlaying='y', side='right', anchor='free', position=pos))
+            fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
+
+    # 4. Final Layout Adjustments
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or f"Variables by Dataset ({agg})", 'x': 0.5},
+        'barmode': 'group',
+        'xaxis': dict(domain=[0, x_domain_end], title="Dataset"),
+        'margin': dict(r=50 + (extras_count * 80)) 
+    }
+    
+    if figsize:
+        layout_args['width'] = figsize[0] * 100
+        layout_args['height'] = figsize[1] * 100
+
+    fig.update_layout(**layout_args)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
+def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers', notched=False,
+                         suptitle=None, darkmode=False, figsize=(12, 8), axis_limits=None, return_axes=False):
+    """
+    Creates a single grouped box plot where the X-axis is the Dataset name,
+    and the boxes are the different Y-variables, each scaled to their own Y-axis.
+    """
+    import plotly.graph_objects as go
+    import plotly.express as px
+
+    active_ds = [d for d in list_of_datasets if d.select]
+    if not active_ds:
+        print("No datasets selected.")
+        return None
+
+    y_list = y if isinstance(y, list) else [y]
+    axis_limits = axis_limits or {}
+    color_cycle = px.colors.qualitative.Plotly
+
+    fig = go.Figure()
+
+    # 1. Domain Management for Extra Y-Axes
+    extras_count = max(0, len(y_list) - 2)
+    width_per_axis = 0.08
+    required_space = extras_count * width_per_axis
+    x_domain_end = max(0.5, 1.0 - required_space) 
+
+    # 2. Add Traces and Axes
+    for idx_y, yi in enumerate(y_list):
+        var_color = color_cycle[idx_y % len(color_cycle)]
+
+        # Extract all valid data for this specific variable across all datasets
+        all_y_data = []
+        all_x_labels = []
+        
+        for ds in active_ds:
+            if yi in ds.df.columns:
+                valid_data = ds.df[yi].dropna()
+                if not valid_data.empty:
+                    # Append the raw values
+                    all_y_data.extend(valid_data.values)
+                    # Append the corresponding dataset name for each value
+                    label = f"{ds.index}: {ds.title}"
+                    all_x_labels.extend([label] * len(valid_data))
+
+        # Skip trace if no data was found for this variable across all datasets
+        if not all_y_data:
+            continue
+
+        y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
+
+        # Add the Box Trace
+        fig.add_trace(go.Box(
+            name=yi,
+            x=all_x_labels,
+            y=all_y_data,
+            yaxis=y_axis_name,
+            offsetgroup=str(idx_y), # Forces grouping across multiple Y-axes
+            marker_color=var_color,
+            boxpoints=points,
+            notched=notched,
+        ))
+
+        # Configure the Layout for this Axis
+        axis_layout = dict(
+            title=yi,
+            title_font=dict(color=var_color),
+            tickfont=dict(color=var_color),
+            showgrid=(idx_y == 0) 
+        )
+
+        if yi in axis_limits:
+            axis_layout['range'] = axis_limits[yi]
+
+        # Anchor logic for positioning axes
+        if idx_y == 0:
+            fig.update_layout(yaxis=axis_layout)
+        elif idx_y == 1:
+            axis_layout.update(dict(overlaying='y', side='right', anchor='x'))
+            fig.update_layout(yaxis2=axis_layout)
+        else:
+            pos = x_domain_end + ((idx_y - 1) * width_per_axis)
+            axis_layout.update(dict(overlaying='y', side='right', anchor='free', position=pos))
+            fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
+
+    # 3. Final Layout Adjustments
+    layout_args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': {'text': suptitle or "Variables by Dataset", 'x': 0.5},
+        'boxmode': boxmode,
+        'xaxis': dict(domain=[0, x_domain_end], title="Dataset"),
+        'margin': dict(r=50 + (extras_count * 80)) 
+    }
+    
+    if figsize:
+        layout_args['width'] = figsize[0] * 100
+        layout_args['height'] = figsize[1] * 100
+
+    fig.update_layout(**layout_args)
+
+    if return_axes: return fig
+    fig.show()
+    return fig
+
 class UnichartNotebook:
     def __init__(self):
         """
@@ -1821,10 +2032,10 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-    def bar(self, x=None, y=None, by='vars', barmode='group', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+
+    def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
             Unified interface for Bar Charts.
-            Incorporates the scale method (self.axis_limits) for individual axes.
             """
             if x is None: x = self.last_x
             if y is None: y = self.last_y
@@ -1832,25 +2043,39 @@ class UnichartNotebook:
 
             y_list = y if isinstance(y, list) else [y]
 
-            if by in ['sets', 'datasets']:
+            # --- 1. DISPATCH BLOCK ---
+            if by == 'dataset_x':
+                fig = unibar_datasets_as_x(
+                    list_of_datasets=self.uset, y=y_list, agg=agg,
+                    suptitle=self.suptitle, figsize=figsize, 
+                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+                )
+                # dataset_x handles its own axis limits internally, so we return early
+                if fig:
+                    fig = self._apply_fonts(fig)
+                    if suppress_legends:
+                        fig.update_traces(visible='legendonly')
+                    self.last_fig = fig
+                return fig
+                
+            elif by in ['sets', 'datasets']:
                 fig = unibar_per_dataset(
                     list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
                     suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, return_axes=True # Generate figure but don't show yet
+                    darkmode=self.darkmode, return_axes=True 
                 )
             else:
                 fig = unibar(
                     list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
                     suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, return_axes=True # Generate figure but don't show yet
+                    darkmode=self.darkmode, return_axes=True 
                 )
                 
+            # --- 2. APPLY LIMITS (Only for original vars/sets modes) ---
             if fig:
-                # 1. Apply global X-axis limits
                 if x in self.axis_limits:
                     fig.update_xaxes(range=self.axis_limits[x])
 
-                # 2. Grid calculation to apply specific Y limits
                 active_sets = [d for d in self.uset if d.select]
                 n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
                 
@@ -1861,27 +2086,24 @@ class UnichartNotebook:
                     calc_ncols = int(np.ceil(n_items / nrows))
                 calc_ncols = max(1, calc_ncols)
 
-                # 3. Apply Y-axis limits
                 if by in ['sets', 'datasets']:
-                    # 'sets' mode: subplots are datasets. They all share the same Y variables.
-                    # Apply the limit of the primary Y variable to all subplots.
                     primary_y = y_list[0]
                     if primary_y in self.axis_limits:
                         fig.update_yaxes(range=self.axis_limits[primary_y])
                 else:
-                    # 'vars' mode: subplots are distinct Y variables. Apply limits individually.
                     for idx, yi in enumerate(y_list):
                         if yi in self.axis_limits:
                             r = (idx // calc_ncols) + 1
                             c = (idx % calc_ncols) + 1
                             fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-                # 4. Final Polish
+                # --- 3. FINAL POLISH ---
                 fig = self._apply_fonts(fig)
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
                 
+            # Ensure we return the figure object so fig1.show() works!
             return fig
 
     # ------------------------------------------------------------------
@@ -1892,28 +2114,31 @@ class UnichartNotebook:
                 color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
             Unified interface for Box Plots.
-            
-            Parameters:
-            -----------
-            by : str
-                'vars' (default) - Subplots by variable (compare datasets side-by-side).
-                'sets' - Subplots by dataset (compare variables side-by-side).
-            points : str
-                'outliers' (default), 'all', 'suspectedoutliers', or False.
-            notched : bool
-                Whether to draw a notched boxplot (useful for rough confidence interval comparison).
-            color : str, optional
-                Override color for all boxes (only applies when by='vars').
             """
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x, self.last_y = x, y
 
-            # Resolve limits if they exist for the primary Y
-            primary_y = y[0] if isinstance(y, list) else y
-            y_limit = self.axis_limits.get(primary_y)
+            y_list = y if isinstance(y, list) else [y]
 
-            if by in ['sets', 'datasets']:
+            # --- 1. DISPATCH BLOCK ---
+            if by == 'dataset_x':
+                fig = unibox_datasets_as_x(
+                    list_of_datasets=self.uset, y=y_list, boxmode=boxmode, 
+                    points=points, notched=notched, suptitle=suptitle or self.suptitle, 
+                    figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+                )
+                if fig:
+                    fig = self._apply_fonts(fig)
+                    if suppress_legends:
+                        fig.update_traces(visible='legendonly')
+                    self.last_fig = fig
+                return fig
+
+            elif by in ['sets', 'datasets']:
+                # Resolve limits if they exist for the primary Y
+                primary_y = y_list[0]
+                y_limit = self.axis_limits.get(primary_y)
                 fig = unibox_per_dataset(
                     list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
                     points=points, notched=notched,
@@ -1921,22 +2146,42 @@ class UnichartNotebook:
                     darkmode=self.darkmode, y_lim=y_limit, return_axes=True
                 )
             else:
+                # vars mode limits are handled inside unibox
                 fig = unibox(
                     list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
-                    points=points, notched=notched,
-                    color=color,
+                    points=points, notched=notched, color=color,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+                    darkmode=self.darkmode, y_lim=None, return_axes=True
                 )
-            
-            # Fixed UnboundLocalError here
-            fig = self._apply_fonts(fig)
-            if fig and suppress_legends:
-                fig.update_traces(visible='legendonly')
-            self.last_fig = fig
-            return fig
                 
-    # ------------------------------------------------------------------
+                # Apply limits for vars mode
+                if fig:
+                    active_sets = [d for d in self.uset if d.select]
+                    n_items = len(y_list)
+                    calc_ncols = ncols
+                    if calc_ncols is None and nrows is None:
+                        calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
+                    elif calc_ncols is None:
+                        calc_ncols = int(np.ceil(n_items / nrows))
+                    calc_ncols = max(1, calc_ncols)
+
+                    for idx, yi in enumerate(y_list):
+                        if yi in self.axis_limits:
+                            r = (idx // calc_ncols) + 1
+                            c = (idx % calc_ncols) + 1
+                            fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+
+            # --- 2. FINAL POLISH ---
+            if fig:
+                if x in self.axis_limits:
+                    fig.update_xaxes(range=self.axis_limits[x])
+                fig = self._apply_fonts(fig)
+                if suppress_legends:
+                    fig.update_traces(visible='legendonly')
+                self.last_fig = fig
+                
+            return fig               
+        # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
     def histogram(self, x=None, by='vars', nbins=None, histnorm='', barmode='overlay', opacity=0.7,
