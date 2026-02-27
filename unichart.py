@@ -968,20 +968,18 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     return fig
 
 
-def unihistogram(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
+                 bin_size=None, bin_start=None, bin_end=None, 
+                 histnorm='', barmode='overlay', opacity=0.7,
                  color=None, suptitle=None, subplot_titles=None, darkmode=False, 
                  figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
     """
     Create a unified histogram for a list of datasets.
     Subplots are organized by Variable (x).
-    
-    Parameters:
-    - color: str, optional (Overrides dataset colors if provided)
     """
     x_list = x if isinstance(x, list) else [x]
     n_x = len(x_list)
     
-    # --- Grid Setup ---
     if nrows is None and ncols is None:
         ncols = min(3, max(1, int(np.ceil(np.sqrt(n_x)))))
         nrows = int(np.ceil(n_x / ncols))
@@ -1000,12 +998,18 @@ def unihistogram(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay'
         layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
     
     fig.update_layout(**layout_args)
+    
+    # Construct explicit binning logic
+    xbins_dict = {}
+    if bin_size is not None: xbins_dict['size'] = bin_size
+    if bin_start is not None: xbins_dict['start'] = bin_start
+    if bin_end is not None: xbins_dict['end'] = bin_end
+    xbins = xbins_dict if xbins_dict else None
 
     for ds in list_of_datasets:
         if not ds.select: continue
         df = ds.df.copy()
         
-        # Use explicit color arg if provided, otherwise use the Dataset's class color
         use_color = color if color else ds.color
 
         for idx_x, xi in enumerate(x_list):
@@ -1013,40 +1017,46 @@ def unihistogram(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay'
             
             if xi not in df.columns: continue
 
-            clean_data = df[xi].dropna()
+            subset_cols = [xi] if y is None else [xi, y]
+            if y and y not in df.columns: continue
+            
+            clean_data = df.dropna(subset=subset_cols)
+            if clean_data.empty: continue
 
-            fig.add_trace(go.Histogram(
-                x=clean_data,
+            trace_args = dict(
+                x=clean_data[xi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
                 marker_color=use_color,
                 opacity=opacity,
                 nbinsx=nbins,
+                xbins=xbins,  # Injects exact bin width/range if specified
                 histnorm=histnorm,
                 showlegend=(idx_x == 0)
-            ), row=row, col=col)
+            )
 
-    # Final Formatting
+            if y:
+                trace_args['y'] = clean_data[y]
+                trace_args['histfunc'] = histfunc
+
+            fig.add_trace(go.Histogram(**trace_args), row=row, col=col)
+
     if x_lim: fig.update_xaxes(range=x_lim)
     
-    y_label = "Density" if "density" in histnorm else "Count"
+    y_label = f"Sum of {y}" if y else ("Density" if "density" in histnorm else "Count")
     fig.update_yaxes(title_text=y_label)
 
     if return_axes: return fig
     fig.show()
     return fig
 
-
-def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmode='overlay', opacity=0.7,
+def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
+                            bin_size=None, bin_start=None, bin_end=None,
+                            histnorm='', barmode='overlay', opacity=0.7,
                             color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                             darkmode=False, x_lim=None, return_axes=False):
     """
     Create a unified histogram where Subplots are organized by Dataset.
-    
-    Color Logic:
-    - If plotting 1 variable: Uses the Dataset's unique color.
-    - If plotting >1 variable: Uses a color cycle (to distinguish variables), 
-      unless 'color' override is provided.
     """
     active_ds = [d for d in list_of_datasets if d.select]
     x_list = x if isinstance(x, list) else [x]
@@ -1056,7 +1066,6 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
         print("No datasets selected.")
         return None
 
-    # --- Grid Setup ---
     if nrows is None and ncols is None:
         ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
         nrows = int(np.ceil(n_sets / ncols))
@@ -1076,6 +1085,13 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
         layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
     
     fig.update_layout(**layout_args)
+    
+    # Construct explicit binning logic
+    xbins_dict = {}
+    if bin_size is not None: xbins_dict['size'] = bin_size
+    if bin_start is not None: xbins_dict['start'] = bin_start
+    if bin_end is not None: xbins_dict['end'] = bin_end
+    xbins = xbins_dict if xbins_dict else None
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -1084,7 +1100,11 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
         for idx_x, xi in enumerate(x_list):
             if xi not in df.columns: continue
             
-            clean_data = df[xi].dropna()
+            subset_cols = [xi] if y is None else [xi, y]
+            if y and y not in df.columns: continue
+            
+            clean_data = df.dropna(subset=subset_cols)
+            if clean_data.empty: continue
             
             if color:
                 use_color = color
@@ -1093,20 +1113,27 @@ def unihistogram_by_dataset(list_of_datasets, x, nbins=None, histnorm='', barmod
             else:
                 use_color = color_cycle[idx_x % len(color_cycle)]
 
-            fig.add_trace(go.Histogram(
-                x=clean_data,
+            trace_args = dict(
+                x=clean_data[xi],
                 name=xi,
                 legendgroup=xi,
                 marker_color=use_color,
                 opacity=opacity,
                 nbinsx=nbins,
+                xbins=xbins, # Injects exact bin width/range if specified
                 histnorm=histnorm,
                 showlegend=(idx_ds == 0)
-            ), row=row, col=col)
+            )
+
+            if y:
+                trace_args['y'] = clean_data[y]
+                trace_args['histfunc'] = histfunc
+
+            fig.add_trace(go.Histogram(**trace_args), row=row, col=col)
 
     if x_lim: fig.update_xaxes(range=x_lim)
     
-    y_label = "Density" if "density" in histnorm else "Count"
+    y_label = f"Sum of {y}" if y else ("Density" if "density" in histnorm else "Count")
     fig.update_yaxes(title_text=y_label)
 
     if return_axes: return fig
@@ -2184,56 +2211,67 @@ class UnichartNotebook:
         # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
-    def histogram(self, x=None, by='vars', nbins=None, histnorm='', barmode='overlay', opacity=0.7,
-                  color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-        """
-        Unified interface for Histograms.
-        
-        Parameters:
-        -----------
-        x : str or list
-            The column(s) to distribute.
-        by : str
-            'vars' (default) - Subplots by variable (compare datasets).
-                               Uses Dataset colors.
-            'sets'           - Subplots by dataset (compare variables).
-                               Uses Dataset color (if 1 var) or Color Cycle (if >1 var).
-        histnorm : str
-            '' (default, count), 'percent', 'probability', 'density', 'probability density'
-        color : str, optional
-            Override the color for all traces.
-        """
-        if x is None: x = self.last_x
-        self.last_x = x
-        
-        # Resolve limit
-        limit = None
-        if isinstance(x, str):
-            limit = self.axis_limits.get(x)
-        elif isinstance(x, list) and len(x) == 1:
-            limit = self.axis_limits.get(x[0])
-
-        if by in ['sets', 'datasets']:
-            fig = unihistogram_by_dataset(
-                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
-                barmode=barmode, opacity=opacity, color=color,
-                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, x_lim=limit, return_axes=True
-            )
-        else:
-            fig = unihistogram(
-                list_of_datasets=self.uset, x=x, nbins=nbins, histnorm=histnorm,
-                barmode=barmode, opacity=opacity, color=color,
-                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, x_lim=limit, return_axes=True
-            )
+    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None, 
+                    bin_size=None, bin_start=None, bin_end=None,
+                    histnorm='', barmode='overlay', opacity=0.7,
+                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+            """
+            Unified interface for Histograms.
             
-        fig = self._apply_fonts(fig)
-        if fig and suppress_legends:
-            fig.update_traces(visible='legendonly')
-        self.last_fig = fig
-        return fig
+            Parameters:
+            -----------
+            x : str or list
+                The column(s) to distribute (the bins).
+            y : str, optional
+                The column to use for weighting the histogram (e.g., time spent).
+            histfunc : str, optional
+                The aggregation function for 'y' (default is 'sum'). Can be 'count', 'sum', 'avg', 'min', 'max'.
+            nbins : int, optional
+                Target number of bins. Plotly will attempt to create approximately this many.
+            bin_size : float, optional
+                Forces the exact width of each bin.
+            bin_start : float, optional
+                Forces the starting value of the first bin.
+            bin_end : float, optional
+                Forces the ending value of the last bin.
+            by : str
+                'vars' (default) - Subplots by variable (compare datasets).
+                'sets'           - Subplots by dataset (compare variables).
+            histnorm : str
+                '' (default, count), 'percent', 'probability', 'density', 'probability density'
+            """
+            if x is None: x = self.last_x
+            self.last_x = x
+            
+            limit = None
+            if isinstance(x, str):
+                limit = self.axis_limits.get(x)
+            elif isinstance(x, list) and len(x) == 1:
+                limit = self.axis_limits.get(x[0])
 
+            if by in ['sets', 'datasets']:
+                fig = unihistogram_by_dataset(
+                    list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
+                    histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, x_lim=limit, return_axes=True
+                )
+            else:
+                fig = unihistogram(
+                    list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
+                    histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                    darkmode=self.darkmode, x_lim=limit, return_axes=True
+                )
+                
+            fig = self._apply_fonts(fig)
+            if fig and suppress_legends:
+                fig.update_traces(visible='legendonly')
+            self.last_fig = fig
+            return fig
+        
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
