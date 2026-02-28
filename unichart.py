@@ -1142,6 +1142,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
 
 def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                interpolate=True, interp_res=100, interp_method='linear',
+               ncontours=None, 
                suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
                darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
                axis_limits=None, return_axes=False):
@@ -1221,13 +1222,14 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
 
             fig.add_trace(go.Contour(
                 x=plot_x, y=plot_y, z=plot_z,
-                zmin=zmin, zmax=zmax,  # Apply limits directly to the color scale
+                zmin=zmin, zmax=zmax,  
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
+                ncontours=ncontours, 
                 line=dict(width=ds.linewidth, color=ds.color if use_coloring=='lines' else None),
-                showscale=(idx_ds == 0), 
+                showscale=(idx_ds == 0),
                 colorbar=dict(
                     title=zi,
                     x=cb_x,
@@ -1248,6 +1250,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
 
 def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                            interpolate=True, interp_res=100, interp_method='linear',
+                           ncontours=None, # <-- ADDED
                            suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                            darkmode=False, axis_limits=None, return_axes=False):
     """
@@ -1320,12 +1323,13 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
             fig.add_trace(go.Contour(
                 x=plot_x, y=plot_y, z=plot_z,
-                zmin=zmin, zmax=zmax,  # Apply limits directly to the color scale
+                zmin=zmin, zmax=zmax,  
                 name=zi,
                 legendgroup=zi,
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
-                showscale=(idx_ds == 0), 
+                ncontours=ncontours, 
+                showscale=(idx_ds == 0),
                 colorbar=dict(
                     title=zi,
                     x=cb_x,
@@ -2273,8 +2277,9 @@ class UnichartNotebook:
             return fig
         
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
-                    colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
-                    suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
+                ncontours=None, # <-- ADDED
+                suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
             Unified interface for Contour Plots.
             
@@ -2312,6 +2317,7 @@ class UnichartNotebook:
                     list_of_datasets=self.uset, x=x, y=y, z=z, 
                     contours_coloring=contours_coloring, colorscale=colorscale,
                     interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                    ncontours=ncontours, # <-- ADDED
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
                     darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
                 )
@@ -2320,6 +2326,7 @@ class UnichartNotebook:
                     list_of_datasets=self.uset, x=x, y=y, z=z,
                     contours_coloring=contours_coloring, colorscale=colorscale,
                     interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                    ncontours=ncontours, # <-- ADDED
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
                     darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
                 )
