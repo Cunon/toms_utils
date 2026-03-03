@@ -1983,7 +1983,6 @@ class UnichartNotebook:
                 'sets'           - Creates a subplot for each Dataset.
                                 Best for looking at all metrics for a specific dataset.
             """
-            # 1. State Management & Defaults
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x = x
@@ -1996,9 +1995,7 @@ class UnichartNotebook:
             self.last_ncols = ncols
             self.last_nrows = nrows
 
-            # 2. Dispatch Logic
             if by == 'sets' or by == 'datasets':
-                # --- ROUTE TO DATASET GRID ---
                 fig = uniplot_per_dataset(
                     list_of_datasets=self.uset,
                     x=x,
@@ -2014,11 +2011,9 @@ class UnichartNotebook:
                     axis_limits=self.axis_limits, 
                     return_axes=True 
                 )
-                # Set flag for decoration logic
                 mode = 'sets'
                 
             else:
-                # --- ROUTE TO VARIABLE GRID (Original) ---
                 plot_args = {
                     'list_of_datasets': self.uset,
                     'x': x, 
@@ -2029,7 +2024,7 @@ class UnichartNotebook:
                     'xlabel': self.x_label,      
                     'ylabel': self.y_label, 
                     'subplot_titles': subplot_titles,
-                    'return_axes': True, # Important: get figure back instead of showing immediately
+                    'return_axes': True,
                     'figsize': figsize,
                     'ncols': ncols,
                     'nrows': nrows,
@@ -2040,8 +2035,7 @@ class UnichartNotebook:
 
             if fig is None: return
 
-            # 3. Apply Decorations (Unified Logic)
-            # We need to calculate grid dimensions to know where to place lines/highlights
+            # Calculate grid dimensions to know where to place lines/highlights
             y_list = y if isinstance(y, list) else [y]
             active_sets = [d for d in self.uset if d.select]
             
@@ -2266,7 +2260,6 @@ class UnichartNotebook:
                             c = (idx % calc_ncols) + 1
                             fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-            # --- 2. FINAL POLISH ---
             if fig:
                 if x in self.axis_limits:
                     fig.update_xaxes(range=self.axis_limits[x])
@@ -2402,7 +2395,6 @@ class UnichartNotebook:
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
-                fig.show()
                 
             return fig
 
@@ -2498,8 +2490,6 @@ class UnichartNotebook:
             'margin': dict(l=20, r=20, t=50, b=20),
         }
         fig.update_layout(**layout_args)
-        
-        fig.show()
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
