@@ -118,7 +118,7 @@ class Dataset:
         self.markersize = 10  # Adjusted default for Plotly
         self.alpha = 1
         self.hue = ""
-        self.hue_palette = "Viridis" # Default Plotly colorscale
+        self.hue_palette = "Jet" # Default Plotly colorscale
         self.hue_order = None
         self.reg_order = None
         self.style = None
@@ -340,7 +340,7 @@ def _calculate_regression(df, x_col, y_col, order):
 # Main Plotting Functions
 # -----------------------------------------------------------------------------
 def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None, marker=None,
-            markersize=10, marker_edge_color="black", linestyle=None, hue_palette="Viridis",
+            markersize=10, marker_edge_color="black", linestyle=None, hue_palette="Jet",
             hue_order=None, line=False, suppress_msg=False, return_axes=False, axes=None,
             suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
@@ -487,7 +487,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 else:
                     hue_series = hue_data.astype('category')
                     marker_dict['color'] = hue_series.cat.codes
-                    marker_dict['colorscale'] = fmt.get('hue_palette', 'Viridis')
+                    marker_dict['colorscale'] = fmt.get('hue_palette', 'Jet')
                     marker_dict['showscale'] = False 
             else:
                 marker_dict['color'] = cur_color
@@ -1250,7 +1250,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
 
 def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                            interpolate=True, interp_res=100, interp_method='linear',
-                           ncontours=None, # <-- ADDED
+                           ncontours=None,
                            suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                            darkmode=False, axis_limits=None, return_axes=False):
     """
@@ -1728,31 +1728,95 @@ class UnichartNotebook:
     # Styling
     # ------------------------------------------------------------------
     def color(self, uset_slice, color_val):
+        """
+        Set the primary color for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            color_val (str): A standard color name ('red'), hex code ('#FF5733'), 
+                             or RGB/RGBA string ('rgb(255, 0, 0)').
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.color = color_val
 
     def marker(self, uset_slice, marker_val):
+        """
+        Set the marker style for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            marker_val (str): Matplotlib-style marker ('o', 's', '^', 'D', '.') 
+                              or Plotly-style marker ('circle', 'square').
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.marker = marker_val
 
     def linestyle(self, uset_slice, style_val):
+        """
+        Set the line style for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            style_val (str): Matplotlib-style string ('-', '--', '-.', ':') 
+                             or Plotly string ('solid', 'dash', 'dashdot', 'dot').
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.linestyle = style_val
             
     def markersize(self, uset_slice, size_val):
+        """
+        Set the marker size for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            size_val (int or float): Size of the marker (e.g., 5, 10.5).
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.markersize = size_val
     
     def linewidth(self, uset_slice, width_val):
-        """Set the line thickness for the specified dataset(s)."""
+        """
+        Set the line thickness for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            width_val (int or float): Thickness of the line (e.g., 1, 2.5).
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.linewidth = width_val
 
     def hue(self, uset_slice, col_name):
+        """
+        Map a dataframe column to the color scale for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            col_name (str): Name of the column to color by (e.g., 'Temperature', 'Category').
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.hue = col_name
 
+    def hue_palette(self, uset_slice, hue_palette):
+        """
+        Set the color scale/palette used when `hue` is mapped to a variable.
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            hue_palette (str or list): A Plotly colorscale name (e.g., 'Viridis', 'Plasma', 'Inferno')
+                                       or a discrete sequence (e.g., px.colors.qualitative.Pastel).
+        """
+        for ds in self._get_uset_slice(uset_slice):
+            ds.hue_palette = hue_palette
+
     def alpha(self, uset_slice, alpha_val):
+        """
+        Set the opacity (alpha) for the specified dataset(s).
+        
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            alpha_val (float): Opacity value between 0.0 (fully transparent) and 1.0 (fully opaque).
+                               Example: 0.5.
+        """
         for ds in self._get_uset_slice(uset_slice):
             ds.alpha = alpha_val
 
@@ -2278,7 +2342,7 @@ class UnichartNotebook:
         
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
                 colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
-                ncontours=None, # <-- ADDED
+                ncontours=None,
                 suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
             Unified interface for Contour Plots.
@@ -2317,7 +2381,7 @@ class UnichartNotebook:
                     list_of_datasets=self.uset, x=x, y=y, z=z, 
                     contours_coloring=contours_coloring, colorscale=colorscale,
                     interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                    ncontours=ncontours, # <-- ADDED
+                    ncontours=ncontours,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
                     darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
                 )
@@ -2326,7 +2390,7 @@ class UnichartNotebook:
                     list_of_datasets=self.uset, x=x, y=y, z=z,
                     contours_coloring=contours_coloring, colorscale=colorscale,
                     interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                    ncontours=ncontours, # <-- ADDED
+                    ncontours=ncontours,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
                     darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
                 )
