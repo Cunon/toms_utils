@@ -118,7 +118,7 @@ class Dataset:
         self.markersize = 10  # Adjusted default for Plotly
         self.alpha = 1
         self.hue = ""
-        self.hue_palette = "Jet" # Default Plotly colorscale
+        self.hue_palette = "Jet"
         self.hue_order = None
         self.reg_order = None
         self.style = None
@@ -1935,8 +1935,35 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Font Management
     # ------------------------------------------------------------------
-    def set_font_sizes(self, suptitle=None, legend=None, axes_title=None, axes_tick=None):
-        """Set independent font sizes for various plot elements."""
+    def set_font_sizes(self, preset=None, suptitle=None, legend=None, axes_title=None, axes_tick=None):
+        """
+        Set independent font sizes for various plot elements.
+        
+        Parameters:
+        -----------
+        preset : str, optional
+            A predefined size profile: 'small', 'med', 'medium', 'large', 'x-large'.
+        suptitle, legend, axes_title, axes_tick : int, optional
+            Specific font sizes. If provided alongside a preset, these will override the preset's specific value.
+        """
+        if preset:
+            presets = {
+                'small':   {'suptitle': 14, 'legend': 10, 'axes_title': 12, 'axes_tick': 10},
+                'med':     {'suptitle': 18, 'legend': 12, 'axes_title': 14, 'axes_tick': 12},
+                'medium':  {'suptitle': 18, 'legend': 12, 'axes_title': 14, 'axes_tick': 12},
+                'large':   {'suptitle': 24, 'legend': 16, 'axes_title': 18, 'axes_tick': 14},
+                'x-large': {'suptitle': 30, 'legend': 20, 'axes_title': 24, 'axes_tick': 18}
+            }
+            p = str(preset).lower()
+            if p in presets:
+                self.suptitle_size = presets[p]['suptitle']
+                self.legend_size = presets[p]['legend']
+                self.axes_title_size = presets[p]['axes_title']
+                self.axes_tick_size = presets[p]['axes_tick']
+            else:
+                print(f"Warning: Font preset '{preset}' not recognized. Try: {list(presets.keys())}")
+
+        # Individual parameters override the preset if provided
         if suptitle is not None: self.suptitle_size = suptitle
         if legend is not None: self.legend_size = legend
         if axes_title is not None: self.axes_title_size = axes_title
