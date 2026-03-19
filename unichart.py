@@ -12,6 +12,8 @@ from IPython.display import display, clear_output
 import re
 import inspect
 from scipy.interpolate import griddata
+from toms_utils.dataframe_manipulation import open_datafile, keep_columns, align_dataframes
+
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -282,6 +284,7 @@ class Dataset:
             'plot_type': self.plot_type,
             'linewidth': self.linewidth,
             'edgewidth': self.edgewidth,
+            'delta_sets': self.delta_sets,
         }
     
     def set_format_option(self, key, value):
@@ -1664,6 +1667,44 @@ class UnichartNotebook:
         except Exception as e:
             print(f"Error reading clipboard: {e}")
 
+    def load_file(self, title=None, set_name_column=None, set_idx_column=None, 
+                    load_cols_as_vars=False, initial_dir=None, force_format=None, 
+                    add_file_info=False, **kwargs):
+            """
+            Opens a system file dialog to select a dataset and loads it into the environment.
+            
+            Parameters:
+            -----------
+            title, set_name_column, set_idx_column, load_cols_as_vars: 
+                Arguments passed directly to the internal load_df() method.
+            initial_dir, force_format, add_file_info, **kwargs: 
+                Arguments passed to the open_datafile() helper.
+            """
+            # 1. Call your standalone file dialog function
+            df = open_datafile(
+                initial_dir=initial_dir, 
+                force_format=force_format, 
+                add_file_info=add_file_info, 
+                **kwargs
+            )
+            
+            # 2. Process the result
+            if df is not None:
+                # Auto-title based on filename if available and no title was provided
+                if title is None and add_file_info and 'FILENAME' in df.columns:
+                    title = str(df['FILENAME'].iloc[0])
+                    
+                # Route the DataFrame into the standard loading pipeline
+                self.load_df(
+                    df, 
+                    title=title, 
+                    set_name_column=set_name_column, 
+                    set_idx_column=set_idx_column, 
+                    load_cols_as_vars=load_cols_as_vars
+                )
+            else:
+                print("Operation cancelled or file could not be read. No data was loaded.")
+
     def clear_data(self):
         self.uset = []
         self._refresh_widgets()
@@ -1850,7 +1891,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Analysis (Ported from GUI)
     # ------------------------------------------------------------------
-    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", "")):
+    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", ""), keep_study_formatting=True):
         """
         Creates a new dataset representing the difference between study and base.
         """
@@ -1881,7 +1922,15 @@ class UnichartNotebook:
             # Create new dataset
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
             self.load_df(merged, title=new_title)
-            
+            self.uset[-1].delta_sets = (base_ds.index, study_ds.index)
+
+            if keep_study_formatting:
+                study_formatting_dict = study_ds.get_format_dict()
+                study_formatting_dict['title'] = "DL_"+study_ds.title
+                study_formatting_dict['index'] = self.uset[-1].index
+                study_formatting_dict['delta_sets'] = self.uset[-1].delta_sets
+                self.uset[-1].update_format_dict(study_formatting_dict)
+
             # Tag it
             self.uset[-1].settype = 'delta'
 
