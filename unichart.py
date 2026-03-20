@@ -599,8 +599,6 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         base_y_name = "yaxis" if subplot_index == 1 else f"yaxis{subplot_index}"
         
         # --- DOMAIN MANAGEMENT ---
-        # 1. Get original domain (default [0,1] if not found)
-        # make_subplots pre-populates these, so we can read them.
         try:
             old_domain = fig.layout[base_x_name].domain
             if not old_domain: old_domain = [0, 1]
@@ -609,19 +607,12 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             
         d_start, d_end = old_domain
         
-        # 2. Calculate space needed for EXTRA axes (vars 3, 4, etc.)
-        # Variable 1 is Left. Variable 2 is Right (anchored to X). 
-        # Variable 3+ need their own space.
         extras_count = max(0, len(y_list) - 2)
         
-        # We reserve roughly 0.08 (8% of width) per extra axis
-        # You can tweak 'width_per_axis' if labels are getting cut off
         width_per_axis = 0.08 
         required_space = extras_count * width_per_axis
         
-        # 3. Shrink the X-axis to make room
         new_d_end = d_end - required_space
-        # Safety check: don't invert axis if too many vars
         if new_d_end <= d_start + 0.1: new_d_end = d_end 
         
         # Apply new domain to the subplot's X-axis
@@ -1680,21 +1671,16 @@ class UnichartNotebook:
             initial_dir, force_format, add_file_info, **kwargs: 
                 Arguments passed to the open_datafile() helper.
             """
-            # 1. Call your standalone file dialog function
             df = open_datafile(
                 initial_dir=initial_dir, 
                 force_format=force_format, 
                 add_file_info=add_file_info, 
                 **kwargs
             )
-            
-            # 2. Process the result
             if df is not None:
-                # Auto-title based on filename if available and no title was provided
                 if title is None and add_file_info and 'FILENAME' in df.columns:
                     title = str(df['FILENAME'].iloc[0])
                     
-                # Route the DataFrame into the standard loading pipeline
                 self.load_df(
                     df, 
                     title=title, 
@@ -1891,15 +1877,18 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Analysis (Ported from GUI)
     # ------------------------------------------------------------------
-    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", ""), keep_study_formatting=True):
+    
+    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, passed_parms=None, suffixes=("_BASE", ""), keep_study_formatting=True):
         """
         Creates a new dataset representing the difference between study and base.
         """
         if align_on is None: align_on = self.last_x
         if delta_parms is None: delta_parms = [self.last_y] if isinstance(self.last_y, str) else self.last_y
         
-        # Ensure list format
+        # Ensure list formats
         if not isinstance(delta_parms, list): delta_parms = [delta_parms]
+        if passed_parms is None: passed_parms = []
+        elif not isinstance(passed_parms, list): passed_parms = [passed_parms]
         
         base_ds = self.uset[base_idx]
         targets = self._get_uset_slice(study_indices)
@@ -1908,7 +1897,11 @@ class UnichartNotebook:
         
         for study_ds in targets:
             df_base = base_ds.df[[align_on] + delta_parms].sort_values(align_on)
-            df_study = study_ds.df[[align_on] + delta_parms].sort_values(align_on)
+            
+            # Combine delta_parms and passed_parms for the study DataFrame
+            # list(dict.fromkeys(...)) removes duplicates while preserving column order
+            study_cols = list(dict.fromkeys([align_on] + delta_parms + passed_parms))
+            df_study = study_ds.df[study_cols].sort_values(align_on)
             
             merged = pd.merge_asof(df_base, df_study, on=align_on, suffixes=suffixes, direction='nearest')
             
@@ -1933,7 +1926,6 @@ class UnichartNotebook:
 
             # Tag it
             self.uset[-1].settype = 'delta'
-
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
