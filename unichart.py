@@ -1881,6 +1881,7 @@ class UnichartNotebook:
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, passed_parms=None, suffixes=("_BASE", ""), keep_study_formatting=True):
         """
         Creates a new dataset representing the difference between study and base.
+        Safely ignores missing columns and skips invalid comparisons.
         """
         if align_on is None: align_on = self.last_x
         if delta_parms is None: delta_parms = [self.last_y] if isinstance(self.last_y, str) else self.last_y
@@ -1896,35 +1897,46 @@ class UnichartNotebook:
         lsuffix, rsuffix = suffixes
         
         for study_ds in targets:
-            df_base = base_ds.df[[align_on] + delta_parms].sort_values(align_on)
+            if align_on not in base_ds.df.columns or align_on not in study_ds.df.columns:
+                print(f"Warning: Alignment column '{align_on}' missing. Skipping study {study_ds.index}.")
+                continue
+                
+            valid_delta_parms = [
+                p for p in delta_parms 
+                if p in base_ds.df.columns and p in study_ds.df.columns
+            ]
             
-            # Combine delta_parms and passed_parms for the study DataFrame
-            # list(dict.fromkeys(...)) removes duplicates while preserving column order
-            study_cols = list(dict.fromkeys([align_on] + delta_parms + passed_parms))
+            if not valid_delta_parms:
+                print(f"Warning: No valid delta parameters shared between base {base_ds.index} and study {study_ds.index}. Skipping.")
+                continue
+
+            valid_passed_parms = [p for p in passed_parms if p in study_ds.df.columns]
+            
+            base_cols = list(dict.fromkeys([align_on] + valid_delta_parms))
+            df_base = base_ds.df[base_cols].sort_values(align_on)
+            
+            study_cols = list(dict.fromkeys([align_on] + valid_delta_parms + valid_passed_parms))
             df_study = study_ds.df[study_cols].sort_values(align_on)
             
             merged = pd.merge_asof(df_base, df_study, on=align_on, suffixes=suffixes, direction='nearest')
             
-            for parm in delta_parms:
+            for parm in valid_delta_parms:
                 b_col = f"{parm}{lsuffix}"
                 s_col = f"{parm}{rsuffix}"
                 merged[f"DL_{parm}"] = merged[s_col] - merged[b_col]
-                # Avoid div by zero
                 merged[f"DLPCT_{parm}"] = np.where(merged[b_col] == 0, np.nan, 100 * (merged[f"DL_{parm}"] / merged[b_col]))
             
-            # Create new dataset
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
             self.load_df(merged, title=new_title)
             self.uset[-1].delta_sets = (base_ds.index, study_ds.index)
 
             if keep_study_formatting:
                 study_formatting_dict = study_ds.get_format_dict()
-                study_formatting_dict['title'] = "DL_"+study_ds.title
+                study_formatting_dict['title'] = "DL_" + study_ds.title
                 study_formatting_dict['index'] = self.uset[-1].index
                 study_formatting_dict['delta_sets'] = self.uset[-1].delta_sets
                 self.uset[-1].update_format_dict(study_formatting_dict)
 
-            # Tag it
             self.uset[-1].settype = 'delta'
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
