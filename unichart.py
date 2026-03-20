@@ -1938,6 +1938,7 @@ class UnichartNotebook:
                 self.uset[-1].update_format_dict(study_formatting_dict)
 
             self.uset[-1].settype = 'delta'
+            
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
@@ -2481,25 +2482,26 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None):
+    def table(self, cols=None, title=None, clipboard=False):
         """
-        Display a Plotly Table of specific columns from selected datasets.
+        Extracts a table of specific columns from selected datasets.
+        By default, copies directly to the system clipboard for easy pasting into Excel.
         
         Parameters:
         -----------
         cols : str or list, optional
-            The columns to display.
-            If None, defaults to [self.last_x] + [self.last_y].
+            The columns to display. If None, defaults to [self.last_x] + [self.last_y].
         title : str, optional
-            Title for the table layout.
+            Title for the table output.
+        clipboard : bool, optional
+            If True, attempts to push the dataframe directly to the system clipboard.
+            
         """
         # 1. Resolve Columns
         if cols is None:
             if self.last_x is None or self.last_y is None:
-                print("No columns specified and no previous plot variables defined.")
-                return
+                return "No columns specified and no previous plot variables defined."
             
-            # Construct list from last_x and last_y (which might be a list or str)
             y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
             target_cols = [self.last_x] + y_part
         else:
@@ -2507,69 +2509,52 @@ class UnichartNotebook:
 
         # 2. Aggregate Data from Selected Datasets
         combined_dfs = []
-        
         for ds in self.uset:
             if not ds.select:
                 continue
             
-            # Filter for existing columns only
             valid_cols = [c for c in target_cols if c in ds.df.columns]
-            
             if not valid_cols:
                 continue
                 
             subset = ds.df[valid_cols].copy()
-            # Add a source column to identify the dataset
             subset.insert(0, 'Dataset', ds.title)
             combined_dfs.append(subset)
 
         if not combined_dfs:
-            print("No data found for the specified columns in selected datasets.")
-            return
+            return "No data found for the specified columns in selected datasets."
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
-        
-        # Fill NaNs for display purposes (optional, but looks better in tables)
         final_df = final_df.fillna('-')
 
-        # 3. Define Styling based on Darkmode
-        if self.darkmode:
-            header_color = 'rgb(30, 30, 30)'
-            cell_color = 'rgb(50, 50, 50)'
-            font_color = 'white'
-            line_color = 'rgb(70, 70, 70)'
-        else:
-            header_color = 'rgb(230, 230, 230)'
-            cell_color = 'white'
-            font_color = 'black'
-            line_color = 'rgb(200, 200, 200)'
+        # 3. Export Logic
+        if clipboard:
+            try:
+                # excel=True is the default, which formats it specifically for spreadsheet pasting
+                final_df.to_clipboard(index=False, excel=True)
+                table_name = title if title else "Data"
+            except Exception as e:
+                print(f"Clipboard copy failed: {e}\nFalling back to Tab-Separated output...\n")
+                # Fall through to the TSV return below
+        
+        md_lines = []
+        
+        if title:
+            md_lines.append(f"### {title}\n")
+            
+        headers = final_df.columns.tolist()
+        
+        # Header row
+        md_lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+        
+        # Separator row
+        md_lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+        
+        # Data rows
+        for _, row in final_df.iterrows():
+            md_lines.append("| " + " | ".join(str(val) for val in row.values) + " |")
 
-        # 4. Create Plotly Table
-        fig = go.Figure(data=[go.Table(
-            header=dict(
-                values=list(final_df.columns),
-                fill_color=header_color,
-                align='left',
-                font=dict(color=font_color, size=12, weight='bold'),
-                line_color=line_color
-            ),
-            cells=dict(
-                values=[final_df[k].tolist() for k in final_df.columns],
-                fill_color=cell_color,
-                align='left',
-                font=dict(color=font_color, size=11),
-                line_color=line_color,
-                height=25
-            )
-        )])
-
-        # Layout updates
-        layout_args = {
-            'title': {'text': title or "Data Table", 'x': 0.5},
-            'template': "plotly_dark" if self.darkmode else "plotly_white",
-            'margin': dict(l=20, r=20, t=50, b=20),
-        }
-        fig.update_layout(**layout_args)
+        return "\n".join(md_lines)
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
