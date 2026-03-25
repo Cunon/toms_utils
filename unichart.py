@@ -207,7 +207,7 @@ class Dataset:
 
     @plot_type.setter
     def plot_type(self, value):
-        valid_plot_types = ['scatter', 'contour', 'histogram', None]
+        valid_plot_types = ['scatter', 'contour', 'histogram', 'box', 'bar', None]
         if value in valid_plot_types:
             self._plot_type = value
         else:
