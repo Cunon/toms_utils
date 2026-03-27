@@ -55,7 +55,7 @@ def validate_linestyle(value):
     return value in LINESTYLE_MAP_MPL_TO_PLOTLY or value is None
 
 def marker_map(index):
-    markers = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
+    markers = [m for m in MARKER_MAP_MPL_TO_PLOTLY.keys() if m not in ['|', '_', '.', 'X']]
     return markers[index % len(markers)]
 
 def _generate_contour_grid(x_data, y_data, z_data, res=100, method='linear'):
@@ -323,20 +323,44 @@ def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', 
     return y_interp
 
 def _calculate_regression(df, x_col, y_col, order):
-    """Internal helper to calculate polynomial regression lines."""
+    """Internal helper to calculate regression lines."""
+    from scipy.optimize import curve_fit
     df_clean = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
     x = df_clean[x_col]
     y = df_clean[y_col]
     
-    if len(x) < order + 1:
+    if len(x) < 3: # Minimum points needed for most curves
         return x, y * np.nan
         
-    z = np.polyfit(x, y, order)
-    p = np.poly1d(z)
-    
-    # Create smooth line
     x_lin = np.linspace(x.min(), x.max(), 100)
-    y_lin = p(x_lin)
+    
+    if isinstance(order, int):
+        z = np.polyfit(x, y, order)
+        p = np.poly1d(z)
+        y_lin = p(x_lin)
+    elif isinstance(order, str):
+        order = order.lower()
+        try:
+            if order == 'exp':
+                def func(x, a, b): return a * np.exp(b * x)
+                popt, _ = curve_fit(func, x, y)
+                y_lin = func(x_lin, *popt)
+            elif order == 'log':
+                def func(x, a, b): return a * np.log(x) + b
+                popt, _ = curve_fit(func, x, y)
+                y_lin = func(x_lin, *popt)
+            elif order == 'power':
+                def func(x, a, b): return a * (x ** b)
+                popt, _ = curve_fit(func, x, y)
+                y_lin = func(x_lin, *popt)
+            else:
+                y_lin = x_lin * np.nan
+        except:
+            # If the curve fit fails to converge, return NaNs so the plot doesn't crash
+            y_lin = x_lin * np.nan 
+    else:
+        y_lin = x_lin * np.nan
+        
     return x_lin, y_lin
 
 # -----------------------------------------------------------------------------
@@ -352,9 +376,8 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     Create a unified plot for a list of datasets using Plotly.
     Updated: Subplot titles default to None; Main title is centered.
     Includes legendgroup fix to toggle traces across subplots.
+    Regression lines inherit the dataset's linestyle; underlying scatter suppresses lines if reg_order is present.
     """
-    from plotly.subplots import make_subplots
-    
     y_list = y if isinstance(y, list) else [y]
     n_y = len(y_list)
     
@@ -419,6 +442,13 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
+        # Determine if reg_order is valid early to strip lines from raw data points
+        valid_reg = False
+        if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
+            valid_reg = True
+        elif isinstance(cur_reg_order, str) and str(cur_reg_order).lower() in ['exp', 'log', 'power']:
+            valid_reg = True
+
         for idx_y, yi in enumerate(y_list):
             row = idx_y // ncols + 1
             col = idx_y % ncols + 1
@@ -467,11 +497,15 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                     ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
+            # Control Scatter Mode based on active regressions
             mode_parts = []
-            if not cur_linestyle: mode_parts.append('markers')
-            else: mode_parts.append('lines')
-            if cur_marker: mode_parts.append('markers')
-            mode = "+".join(mode_parts)
+            if valid_reg:
+                mode_parts.append('markers')
+            else:
+                if not cur_linestyle: mode_parts.append('markers')
+                else: mode_parts.append('lines')
+                if cur_marker: mode_parts.append('markers')
+            mode = "+".join(list(dict.fromkeys(mode_parts))) if mode_parts else 'markers'
 
             marker_dict = dict(
                 size=cur_markersize,
@@ -504,13 +538,13 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 showlegend=(idx_y == 0)
             ), row=row, col=col)
 
-            if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
+            if valid_reg:
                 rx, ry = _calculate_regression(df, x_col, yi, cur_reg_order)
                 fig.add_trace(go.Scatter(
                     x=rx, y=ry, mode='lines',
-                    name=f"{cur_idx}: {cur_title} Fit LS {cur_reg_order}",
+                    name=f"{cur_idx}: {cur_title} Fit {cur_reg_order}",
                     legendgroup=f"group_{cur_idx}",
-                    line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
+                    line=dict(color=cur_color, width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle)),
                     opacity=0.7, hoverinfo='skip', showlegend=False
                 ), row=row, col=col)
 
@@ -541,13 +575,15 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     fig.show()
     return fig
 
+
 def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None, 
                         suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                         darkmode=True, x_lim=None, y_lim=None, axis_limits=None, return_axes=False):
     """
     Revised plotting engine for Multi-Y Axis.
     - Fixes 'ValueError: position' by shrinking X-axis domain to make room for extra axes.
-    - Supports proper line widths and dash styles.
+    - Supports proper line widths, dash styles, and dynamically mapped regression lines.
+    Regression lines inherit the dataset's linestyle; underlying scatter suppresses lines if reg_order is present.
     """
     active_datasets = [d for d in list_of_datasets if d.select]
     if not active_datasets:
@@ -625,6 +661,16 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         else:
             x_col = x
 
+        # Early check for regression to toggle off lines for standard markers
+        valid_reg = False
+        cur_reg_order = dataset.reg_order
+        if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
+            valid_reg = True
+        elif isinstance(cur_reg_order, str) and str(cur_reg_order).lower() in ['exp', 'log', 'power']:
+            valid_reg = True
+
+        scatter_mode = 'markers' if valid_reg else ('lines+markers' if dataset.linestyle else 'markers')
+
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
             
@@ -639,7 +685,7 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             if idx_y == 0:
                 fig.add_trace(go.Scatter(
                     x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    mode=scatter_mode,
                     name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
                     marker=dict(color=var_color, size=dataset.markersize or 6),
                     line=line_dict,
@@ -649,6 +695,9 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 u_dict = dict(title_text=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color), row=row, col=col)
                 if specific_limit: u_dict['range'] = specific_limit
                 fig.update_yaxes(**u_dict)
+                
+                # Assign regression to primary axis
+                curr_y_ref = None
 
             elif idx_y == 1:
                 curr_y_axis = f"yaxis{next_free_axis_idx}"
@@ -657,7 +706,7 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 
                 fig.add_trace(go.Scatter(
                     x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    mode=scatter_mode,
                     name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
                     marker=dict(color=var_color, size=dataset.markersize or 6),
                     line=line_dict,
@@ -689,7 +738,7 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 
                 fig.add_trace(go.Scatter(
                     x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    mode=scatter_mode,
                     name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
                     marker=dict(color=var_color, size=dataset.markersize or 6),
                     line=line_dict,
@@ -705,11 +754,30 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                     anchor="free",          
                     overlaying=base_y_name.replace("axis", ""),
                     side='right',
-                    position=pos,           
+                    position=pos,            
                     showgrid=False
                 )
                 if specific_limit: layout_axis['range'] = specific_limit
                 fig.update_layout({curr_y_axis: layout_axis})
+
+            # --- REGRESSION LOGIC FOR PER_DATASET PLOT ---
+            if valid_reg:
+                rx, ry = _calculate_regression(df, x_col, yi, cur_reg_order)
+                reg_trace = go.Scatter(
+                    x=rx, y=ry, mode='lines',
+                    name=f"{yi} Fit {cur_reg_order}",
+                    legendgroup=yi,
+                    line=dict(color=var_color, width=dataset.linewidth, dash=get_plotly_linestyle(dataset.linestyle)),
+                    opacity=0.7, hoverinfo='skip', showlegend=False
+                )
+                
+                # Route the trendline to the exact same sub-axis as its parent scatter data
+                if idx_y == 0:
+                    fig.add_trace(reg_trace, row=row, col=col)
+                else:
+                    reg_trace.xaxis = base_x_name.replace("axis", "")
+                    reg_trace.yaxis = curr_y_ref
+                    fig.add_trace(reg_trace)
 
         fig.update_xaxes(title_text=x, showgrid=True, row=row, col=col)
         if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
@@ -1665,6 +1733,8 @@ class UnichartNotebook:
         self.legend_size = None
         self.axes_title_size = None
         self.axes_tick_size = None
+
+        self.legend = 'on'
         
         print("UniChart Notebook Environment Initialized.")
 
@@ -1961,16 +2031,39 @@ class UnichartNotebook:
         self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
         
     def scale(self, column, range_tuple):
-            if range_tuple == 'clear' or range_tuple is None:
-                if column in self.axis_limits:
-                    del self.axis_limits[column]
-                    print(f"Limits cleared for '{column}'.")
+        # Normalize 'column' to always be iterable for logic flow
+        # But we can't just wrap string in list because then we need to differentiate?
+        # Actually, simpler to just use a helper function or logic flow.
+        
+        if range_tuple is None or range_tuple == 'clear':
+            # Clear logic
+            # Check if column is list
+            if isinstance(column, (list, tuple)):
+                cols = column
             else:
-                if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
-                    self.axis_limits[column] = range_tuple
-                    print(f"Limits set for '{column}': {range_tuple}")
-                else:
-                    raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
+                cols = [column]
+            
+            for c in cols:
+                if c in self.axis_limits:
+                    del self.axis_limits[c]
+                    print(f"Limits cleared for '{c}'.")
+            return
+
+        # Setting logic
+        if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
+            # Range is valid
+            # Check if column is list
+            if isinstance(column, (list, tuple)):
+                cols = column
+            else:
+                cols = [column]
+            
+            for c in cols:
+                self.axis_limits[c] = range_tuple
+                print(f"Limits set for '{c}': {range_tuple}")
+        else:
+            raise ValueError(...)
+
 
     # ------------------------------------------------------------------
     # Font Management & Layout Fixes
@@ -2159,6 +2252,10 @@ class UnichartNotebook:
             fig = self._apply_fonts(fig)
             if fig and suppress_legends:
                 fig.update_traces(visible='legendonly') 
+            
+            if self.legend == 'off':
+                fig.update_layout(showlegend=False)
+
             self.last_fig = fig
             return fig
 
@@ -2297,6 +2394,10 @@ class UnichartNotebook:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
                 
+            
+            if self.legend == 'off':
+                fig.update_layout(showlegend=False)
+                
             return fig               
 
     # ------------------------------------------------------------------
@@ -2336,6 +2437,9 @@ class UnichartNotebook:
             if fig and suppress_legends:
                 fig.update_traces(visible='legendonly')
             self.last_fig = fig
+            
+            if self.legend == 'off':
+                fig.update_layout(showlegend=False)
             return fig
         
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
@@ -2379,6 +2483,9 @@ class UnichartNotebook:
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
+            
+            if self.legend == 'off':
+                fig.update_layout(showlegend=False)
                 
             return fig
 
@@ -2535,6 +2642,140 @@ class UnichartNotebook:
                 
             return filtered_cols
 
+    def get_fit_metrics(self, uset_slice=None, x=None, y=None):
+        """
+        Calculates and returns the regression equation, R-squared, and RMSE 
+        for the specified datasets that have a reg_order set.
+        Supports polynomial (int), exponential ('exp'), logarithmic ('log'), and power ('power') fits.
+        """
+        import numpy as np
+        import pandas as pd
+        from scipy.optimize import curve_fit
+        import warnings
+        
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        
+        if x is None or y is None:
+            return "Error: Please specify x and y variables, or run a plot first."
+            
+        y_list = y if isinstance(y, list) else [y]
+        
+        # Grab the targeted datasets
+        target_sets = self._get_uset_slice(uset_slice)
+        
+        # Filter for datasets that actually have a regression order set.
+        if uset_slice is None:
+            active_ds = [d for d in target_sets if d.select and d.reg_order is not None]
+        else:
+            active_ds = [d for d in target_sets if d.reg_order is not None]
+            
+        if not active_ds:
+            return "No specified datasets have a valid 'reg_order' set."
+            
+        results = []
+        
+        # Suppress curve_fit warnings to keep terminal output clean if a fit fails
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        
+        for ds in active_ds:
+            # Safely drop NaNs to ensure accurate math
+            df_clean = ds.df.dropna(subset=[x] + [yi for yi in y_list if yi in ds.df.columns])
+            
+            for yi in y_list:
+                if yi not in df_clean.columns: 
+                    continue
+                
+                order = ds.reg_order
+                
+                # Pre-filter data based on fit type constraints
+                if isinstance(order, str) and order.lower() in ['log', 'power']:
+                    # Log and Power fits require x > 0
+                    valid_data = df_clean[df_clean[x] > 0]
+                else:
+                    valid_data = df_clean
+                    
+                x_data = valid_data[x]
+                y_data = valid_data[yi]
+                
+                # Failsafe for insufficient data points
+                if len(x_data) < 3:
+                    continue
+                
+                try:
+                    # 1. Calculate the fit based on type
+                    if isinstance(order, int) and order > 0:
+                        # Polynomial
+                        z = np.polyfit(x_data, y_data, order)
+                        p = np.poly1d(z)
+                        y_pred = p(x_data)
+                        
+                        terms = []
+                        for i, coef in enumerate(z):
+                            pwr = order - i
+                            if pwr == 0: terms.append(f"{coef:.4g}")
+                            elif pwr == 1: terms.append(f"{coef:.4g}x")
+                            else: terms.append(f"{coef:.4g}x^{pwr}")
+                        eq_str = " + ".join(terms).replace(" + -", " - ")
+                        
+                    elif isinstance(order, str):
+                        order_lower = order.lower()
+                        if order_lower == 'exp':
+                            def func(x, a, b): return a * np.exp(b * x)
+                            popt, _ = curve_fit(func, x_data, y_data)
+                            y_pred = func(x_data, *popt)
+                            eq_str = f"{popt[0]:.4g} * e^({popt[1]:.4g}x)"
+                            
+                        elif order_lower == 'log':
+                            def func(x, a, b): return a * np.log(x) + b
+                            popt, _ = curve_fit(func, x_data, y_data)
+                            y_pred = func(x_data, *popt)
+                            eq_str = f"{popt[0]:.4g} * ln(x) + {popt[1]:.4g}".replace("+ -", "- ")
+                            
+                        elif order_lower == 'power':
+                            def func(x, a, b): return a * (x ** b)
+                            popt, _ = curve_fit(func, x_data, y_data)
+                            y_pred = func(x_data, *popt)
+                            eq_str = f"{popt[0]:.4g} * x^{popt[1]:.4g}"
+                        else:
+                            continue  # Skip unknown string types
+                    else:
+                        continue
+                        
+                except Exception:
+                    # Fit failed to converge; skip to the next variable/dataset
+                    continue
+
+                # 2. Calculate Metrics
+                residuals = y_data - y_pred
+                rmse = np.sqrt(np.mean(residuals**2))
+                ss_tot = np.sum((y_data - np.mean(y_data))**2)
+                
+                # Handle edge cases where variance is zero
+                if ss_tot == 0:
+                    r_squared = np.nan
+                else:
+                    ss_res = np.sum(residuals**2)
+                    r_squared = 1 - (ss_res / ss_tot)
+                
+                results.append({
+                    "Set": ds.index,
+                    "Title": ds.title,
+                    "Y-Var": yi,
+                    "Order": order,
+                    "R²": round(r_squared, 4),
+                    "RMSE": round(rmse, 4),
+                    "Equation": eq_str
+                })
+                
+        # Restore warnings to default
+        warnings.filterwarnings("default", category=RuntimeWarning)
+                
+        if not results:
+            return "Could not calculate metrics. Check data for NaNs, insufficient rows, or non-converging fits."
+            
+        return pd.DataFrame(results)
+  
     def summary(self, cols=None):
             if cols is None:
                 y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
