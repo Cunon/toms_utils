@@ -366,17 +366,115 @@ def _calculate_regression(df, x_col, y_col, order):
 # -----------------------------------------------------------------------------
 # Main Plotting Functions
 # -----------------------------------------------------------------------------
-def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None, marker=None,
+def uniplot(list_of_datasets, x, y, color=None, hue=None, marker=None,
             markersize=10, marker_edge_color="black", linestyle=None, hue_palette="Jet",
             hue_order=None, line=False, suppress_msg=False, return_axes=False, axes=None,
             suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None):
     """
-    Create a unified plot for a list of datasets using Plotly.
-    Updated: Subplot titles default to None; Main title is centered.
-    Includes legendgroup fix to toggle traces across subplots.
-    Regression lines inherit the dataset's linestyle; underlying scatter suppresses lines if reg_order is present.
+    Create unified multi-dataset plots using Plotly with flexible subplot configuration.
+    This function generates comprehensive visualizations for multiple datasets with support for
+    subplots, regression lines, custom styling, and interactive features. It automatically
+    handles subplot layout, legend grouping for trace toggling, and provides extensive
+    customization options for colors, markers, and hover information.
+
+    Parameters
+    ----------
+    list_of_datasets : list
+        List of dataset objects containing .df (DataFrame), .select (bool), .order (str),
+        and .get_format_dict() method for styling configuration.
+    x : str
+        Column name for x-axis values.
+    y : str or list of str
+        Column name(s) for y-axis values. Multiple values create subplots.
+    color : str, optional
+        Color for plot elements. Can be overridden by dataset format dict.
+    hue : str, optional
+        Column name for color-coding data points.
+    marker : str, optional
+        Marker symbol for scatter points.
+    markersize : int, default=10
+        Size of markers in scatter plots.
+    marker_edge_color : str, default="black"
+        Edge color for markers.
+    linestyle : str, optional
+        Line style for connecting points (e.g., 'solid', 'dashed').
+    hue_palette : str, default="Jet"
+        Color palette for hue-based coloring.
+    hue_order : list, optional
+        Order of categories for hue-based coloring.
+    line : bool, optional
+        Whether to draw lines connecting points.
+    suppress_msg : bool, default=False
+        Whether to suppress informational messages.
+    return_axes : bool, default=False
+        If True, return the figure object without displaying.
+    axes : object, optional
+        Pre-existing axes object to plot on.
+    suptitle : str, optional
+        Main title for the entire figure.
+    xlabel : str, optional
+        Label for x-axis.
+    ylabel : str, optional
+        Label for y-axis.
+    subplot_titles : list of str, optional
+        Titles for individual subplots.
+    darkmode : bool, default=False
+        If True, use dark theme template.
+    interactive : bool, default=True
+        Whether to enable interactive features.
+    display_parms : list, optional
+        Additional columns to include in hover information.
+    grid : bool, default=True
+        Whether to show grid lines.
+    legend : str, default='above'
+        Legend position ('above', 'off', or other Plotly legend positions).
+    legend_ncols : int, default=1
+        Number of columns for legend items.
+    figsize : tuple, default=(12, 8)
+        Figure size in inches (width, height).
+    ncols : int, optional
+        Number of columns for subplot grid.
+    nrows : int, optional
+        Number of rows for subplot grid.
+    x_lim : tuple, optional
+        X-axis limits as (min, max).
+    y_lim : tuple, optional
+        Y-axis limits as (min, max).
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        The Plotly figure object containing all traces and layout.
+
+    Raises
+    ------
+    ValueError
+        If y contains no valid columns.
+
+    Notes
+    -----
+    - Subplot layout is automatically calculated if nrows and ncols are not specified.
+    - Legend groups are created per dataset to enable trace toggling across subplots.
+    - Regression lines can be added by setting reg_order in dataset format dict.
+    - Hover templates support custom data columns for enhanced interactivity.
+    - Numeric hover values are formatted with 5 significant figures.
+    - Duplicate columns in datasets are automatically removed.
+    - Column names are case-insensitive for x-axis lookup.
+
+    Examples
+    --------
+    >>> from toms_utils import Dataset
+    >>> datasets = [Dataset(df1, select=True), Dataset(df2, select=True)]
+    >>> fig = uniplot(datasets, x='time', y=['value1', 'value2'],
+    ...               suptitle='Time Series Analysis', darkmode=True)
+    >>> # With regression
+    >>> datasets[0].format_dict['reg_order'] = 2
+    >>> fig = uniplot(datasets, x='x', y='y', return_axes=True)
+    >>> # Custom hover information
+    >>> fig = uniplot(datasets, x='date', y='price',
+    ...               display_parms=['volume', 'sector'])
     """
     y_list = y if isinstance(y, list) else [y]
     n_y = len(y_list)
@@ -488,14 +586,19 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             def get_cd_idx(col_name):
                 return custom_data_cols.index(col_name)
 
-            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
-            for parm in hover_cols:
-                # Check if the column is numeric to apply 5 sig fig formatting
-                if pd.api.types.is_numeric_dtype(df[parm]):
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
-                else:
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
-            ht += "<extra></extra>"
+            def format_row(col, num_fmt):
+                """Returns the Plotly customdata string with conditional numeric formatting."""
+                fmt = f":{num_fmt}" if pd.api.types.is_numeric_dtype(df[col]) else ""
+                return f"{col}: %{{customdata[{get_cd_idx(col)}]{fmt}}}"
+
+            ht_parts = [
+                f"<b><u>Set: {cur_idx}</u></b>",
+                f"<b>{cur_title}</b>",
+                format_row(x_col, ".2f"),
+                format_row(yi, ".2f")     # yi is now evaluated on its own data type
+            ]
+            ht_parts.extend([format_row(parm, ".5g") for parm in hover_cols])
+            ht = "<br>".join(ht_parts) + "<extra></extra>"
 
             # Control Scatter Mode based on active regressions
             mode_parts = []
@@ -528,7 +631,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             else:
                 marker_dict['color'] = cur_color
                 line_dict['color'] = cur_color
-
+            
             fig.add_trace(go.Scatter(
                 x=df[x_col], y=df[yi], mode=mode,
                 name=f"{cur_idx}: {cur_title}",
@@ -2269,7 +2372,7 @@ class UnichartNotebook:
             self.last_x, self.last_y = x, y
 
             y_list = y if isinstance(y, list) else [y]
-
+    def help(self):
             if by == 'dataset_x':
                 fig = unibar_datasets_as_x(
                     list_of_datasets=self.uset, y=y_list, agg=agg,
