@@ -2508,6 +2508,7 @@ class UnichartNotebook:
         except Exception as e:
             print(f"Error saving image: {e}")
 
+<<<<<<< Updated upstream
     def list_sets(self):
         """
         Print a formatted table of all loaded datasets, including:
@@ -2577,56 +2578,171 @@ class UnichartNotebook:
                 A sorted list of matching parameter (column) names.
             """
             import fnmatch
+=======
+    def list_sets(self, uset_slice=None):
+            """
+            Displays a summary of loaded datasets.
+            Returns a Pandas DataFrame for rich rendering in Notebooks.
+>>>>>>> Stashed changes
             
-            if set_number is None:
-                target_sets = self.selected()
-                if not target_sets:
-                    target_sets = self.uset
+            Parameters
+            ----------
+            uset_slice : int, list, 'all', or None
+                Which datasets to include in the summary. If None, displays all loaded datasets.
+            """
+            import pandas as pd
+
+            if not self.uset:
+                print("No datasets loaded.")
+                return pd.DataFrame()
+
+            # Resolve which datasets to target. 
+            # Defaulting to 'all' preserves the original behavior if no argument is passed.
+            target_sets = self.uset if uset_slice is None else self._get_uset_slice(uset_slice)
+
+            if not target_sets:
+                print("No datasets match the provided slice.")
+                return pd.DataFrame()
+
+            rows = []
+            for ds in target_sets:
+                rows.append({
+                    "Set": ds.index,
+                    "Title": ds.title,
+                    "Selected": "✓" if ds.select else "",
+                    "Rows": ds.df.shape[0],
+                    "Cols": ds.df.shape[1],
+                    "Query": ds.query if ds.query else "-"
+                })
+
+            df_summary = pd.DataFrame(rows)
+            
+            # Set the index to the Set number for a cleaner visual layout
+            df_summary.set_index("Set", inplace=True)
+            
+            # Contextual summary print
+            if uset_slice is None or uset_slice == 'all' or len(target_sets) == len(self.uset):
+                print(f"Total Loaded Datasets: {len(self.uset)}")
             else:
-                target_sets = self._get_uset_slice(set_number)
+                print(f"Displaying {len(target_sets)} of {len(self.uset)} Loaded Datasets")
+            
+            return df_summary
+
+    # BETA BRANCH EXPERIMENTAL
+    def list_parms(self, set_number=None, search_string=None, use_regex=False):
+            """
+            Search and list available parameters (columns) across targeted datasets.
+            Returns a Pandas DataFrame for rich rendering in Notebooks.
+            """
+            import fnmatch
+            import re
+            import pandas as pd
+            
+            # 1. Target Resolution (Condensed)
+            target_sets = self._get_uset_slice(set_number) if set_number is not None else (self.selected() or self.uset)
                 
             if not target_sets:
                 print("No datasets available to list parameters from.")
-                return []
+                return pd.DataFrame()
                 
-            all_cols = set()
-            for ds in target_sets:
-                all_cols.update(ds.df.columns)
+            # 2. Extract unique columns (Set comprehension)
+            all_cols = {col for ds in target_sets for col in ds.df.columns}
                 
+            # 3. Filtering Logic
             if search_string:
                 try:
                     if not use_regex:
+                        # Auto-wildcard if no wildcards present
                         if not any(c in search_string for c in ['*', '?', '[', ']']):
                             search_string = f"*{search_string}*"
                         pattern_str = fnmatch.translate(search_string)
                     else:
                         pattern_str = search_string
                         
+                    # re.IGNORECASE ensures uniform behavior across Windows and Linux
                     pattern = re.compile(pattern_str, re.IGNORECASE)
                     filtered_cols = [col for col in all_cols if pattern.search(str(col))]
                     
                 except re.error as e:
                     print(f"Invalid search pattern '{search_string}': {e}")
-                    return []
+                    return pd.DataFrame()
             else:
                 filtered_cols = list(all_cols)
                 
+            # Sort case-insensitively
             filtered_cols.sort(key=lambda x: str(x).lower())
-            
-            print(f"Found {len(filtered_cols)} parameters", end="")
-            if search_string:
-                print(f" matching '{search_string}'", end="")
-            if set_number is not None:
-                print(f" in set(s) {set_number}:")
-            else:
-                print(" in active datasets:")
                 
+            # 4. Rich Output Generation
+            results = [
+                {
+                    "Parameter": col, 
+                    "Description": self.parm_description_dict.get(col, "-")
+                } 
+                for col in filtered_cols
+            ]
+            
+            # 5. Contextual Summary Print
+            target_label = f"set(s) {set_number}" if set_number is not None else "active datasets"
+            match_label = f" matching '{search_string}'" if search_string else ""
+            print(f"Found {len(filtered_cols)} parameters{match_label} in {target_label}:")
+            
+            # By returning a DataFrame, Jupyter will automatically render it as a clean HTML table
+            return pd.DataFrame(results)
+    def combine(self, uset_slice=None, new_title="Combined Dataset", add_source_col=True, join='outer', ignore_index=True):
+            """
+            Combines (concatenates) multiple datasets into a new single dataset.
+            
+            Parameters
+            ----------
+            uset_slice : int, list, or 'all', optional
+                Which datasets to combine. If None, combines currently selected datasets.
+                If no datasets are selected, combines all datasets.
+            new_title : str, default="Combined Dataset"
+                Title for the newly generated dataset.
+            add_source_col : bool, default=True
+                If True, inserts a 'SOURCE_SET' column to identify the original dataset.
+            join : str, default='outer'
+                How to handle mismatched columns ('outer' for union, 'inner' for intersection).
+            ignore_index : bool, default=True
+                If True, resets the index in the resulting DataFrame.
+            """
+            # Target resolution: Selected -> All -> Explicit Slice
+            if uset_slice is None:
+                targets = self.selected()
+                if not targets:
+                    targets = self.uset
+            else:
+                targets = self._get_uset_slice(uset_slice)
+                
+<<<<<<< Updated upstream
             # --- MODIFIED OUTPUT LOGIC ---
             for col in filtered_cols:
                 desc = self.parm_description_dict.get(col, "No description available.")
                 print(f"  - {str(col).ljust(25)} : {desc}")
+=======
+            if len(targets) < 2:
+                print("Need at least 2 datasets to perform a combine operation.")
+                return
+>>>>>>> Stashed changes
                 
-            return filtered_cols
+            dfs = []
+            for ds in targets:
+                df = ds.df.copy()
+                if add_source_col:
+                    # Insert identifier at the front of the dataframe for immediate visibility
+                    df.insert(0, 'SOURCE_SET', f"{ds.index}: {ds.title}")
+                dfs.append(df)
+                
+            try:
+                # Concatenate the dataframes
+                combined_df = pd.concat(dfs, join=join, ignore_index=ignore_index)
+                
+                # Load the new dataframe back into the notebook environment
+                self.load_df(combined_df, title=new_title)
+                print(f"Successfully combined {len(targets)} datasets into Set {self.uset[-1].index}: '{new_title}'.")
+                
+            except Exception as e:
+                print(f"Error combining datasets: {e}")
 
     def summary(self, cols=None):
             """
