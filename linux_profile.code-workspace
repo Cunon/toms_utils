@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../linux_profile"
+		},
+		{
+			"path": "."
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../misc_projects/python_notebooks"
+		}
+	],
+	"settings": {}
+}

@@ -12,6 +12,8 @@ from IPython.display import display, clear_output
 import re
 import inspect
 from scipy.interpolate import griddata
+import functools
+import gc
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -345,43 +347,23 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
             legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None):
-    """
-    Create a unified plot for a list of datasets using Plotly.
-    Updated: Subplot titles default to None; Main title is centered.
-    Includes legendgroup fix to toggle traces across subplots.
-    """
-    from plotly.subplots import make_subplots
     
     y_list = y if isinstance(y, list) else [y]
     n_y = len(y_list)
-    
-    if n_y == 0:
-        raise ValueError("y must contain at least one column.")
+    if n_y == 0: raise ValueError("y must contain at least one column.")
 
-    # Determine subplot layout
     if nrows is None and ncols is None:
         ncols_auto = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
         nrows_auto = int(np.ceil(n_y / ncols_auto))
         nrows, ncols = nrows_auto, ncols_auto
-    elif nrows is None:
-        nrows = int(np.ceil(n_y / ncols))
-    elif ncols is None:
-        ncols = int(np.ceil(n_y / nrows))
+    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
 
-    # Initialize subplots
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
 
-    # --- LAYOUT SETUP ---
-    final_title = suptitle if suptitle else f"{x} vs {[str(yi) for yi in y_list]}"
-    
     layout_args = {
         'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {
-            'text': final_title,
-            'x': 0.5,
-            'xanchor': 'center'
-        },
-        # 'xaxis_title': xlabel if xlabel else x, # REMOVED: Applied in loop below instead
+        'title': {'text': suptitle if suptitle else f"{x} vs {[str(yi) for yi in y_list]}", 'x': 0.5, 'xanchor': 'center'},
         'showlegend': True if legend != 'off' else False
     }
 
@@ -391,19 +373,12 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
     fig.update_layout(**layout_args)
 
-    # --- PLOT LOOP ---
     for dataset in list_of_datasets:
-        if not dataset.select:
-            continue
-        df = dataset.df.copy()
+        if not dataset.select: continue
         
-        df = df.loc[:, ~df.columns.duplicated()]
+        # Pull reference instead of full copy
+        base_df = dataset.df
         
-        if dataset.order == 'index': df = df.sort_index()
-        elif dataset.order: df = df.sort_values(by=dataset.order)
-        else: df = df.sort_index()
-
-        # Resolve formatting
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
         cur_hue = fmt.get('hue') or hue
@@ -421,48 +396,52 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             row = idx_y // ncols + 1
             col = idx_y % ncols + 1
 
-            if yi not in df.columns:
-                print(f"Skipping {yi} for set {cur_idx}: column not found.")
-                continue
+            if yi not in base_df.columns: continue
 
             # X-Column Resolution
-            if x not in df.columns:
-                cols_upper = {c.upper(): c for c in df.columns}
+            if x not in base_df.columns:
+                cols_upper = {c.upper(): c for c in base_df.columns}
                 x_key = cols_upper.get(str(x).upper())
-                if not x_key:
-                    print(f"Skipping plot: x='{x}' not found.")
-                    continue
+                if not x_key: continue
                 x_col = x_key
             else:
                 x_col = x
 
-            # Custom Data & Hover
-            hover_cols = [p for p in hover_parms if p in df.columns]
+            # MICRO-SUBSET: Build list of specifically required columns
+            req_cols = [x_col, yi]
+            if cur_hue and cur_hue in base_df.columns: req_cols.append(cur_hue)
+            valid_hover = [p for p in hover_parms if p in base_df.columns]
+            req_cols.extend(valid_hover)
+            if dataset.order and dataset.order != 'index' and dataset.order in base_df.columns:
+                req_cols.append(dataset.order)
+            
+            # Remove duplicates to prevent Pandas indexing errors
+            req_cols = list(dict.fromkeys(req_cols))
+            
+            # Filter duplicated columns in base df dynamically, then slice our Micro-Subset
+            valid_cols_mask = ~base_df.columns.duplicated()
+            df = base_df.loc[:, valid_cols_mask][req_cols]
+
+            # Apply sorting ONLY to the micro-subset
+            if dataset.order == 'index': df = df.sort_index()
+            elif dataset.order: df = df.sort_values(by=dataset.order)
+            else: df = df.sort_index()
+
+            # Custom Data & Hover (using sliced df)
             custom_data_cols = []
             seen_cols = set()
-            
-            for c in [x_col, yi]:
-                if c not in seen_cols:
-                    custom_data_cols.append(c)
-                    seen_cols.add(c)
-            
-            for c in hover_cols:
+            for c in [x_col, yi] + valid_hover:
                 if c not in seen_cols:
                     custom_data_cols.append(c)
                     seen_cols.add(c)
             
             custom_data = df[custom_data_cols]
-            
-            def get_cd_idx(col_name):
-                return custom_data_cols.index(col_name)
+            def get_cd_idx(col_name): return custom_data_cols.index(col_name)
 
             ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
-            for parm in hover_cols:
-                # Check if the column is numeric to apply 5 sig fig formatting
-                if pd.api.types.is_numeric_dtype(df[parm]):
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
-                else:
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
+            for parm in valid_hover:
+                if pd.api.types.is_numeric_dtype(df[parm]): ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
+                else: ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
             mode_parts = []
@@ -472,8 +451,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             mode = "+".join(mode_parts)
 
             marker_dict = dict(
-                size=cur_markersize,
-                symbol=get_plotly_marker(cur_marker),
+                size=cur_markersize, symbol=get_plotly_marker(cur_marker),
                 line=dict(width=fmt.get('edgewidth', 1), color=fmt.get('edge_color', 'black')),
                 opacity=cur_alpha
             )
@@ -522,7 +500,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
         fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
 
-    # Global Axis Limits
     for idx_y, yi in enumerate(y_list):
         row = idx_y // ncols + 1
         col = idx_y % ncols + 1
@@ -538,42 +515,31 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     if return_axes: return fig
     fig.show()
     return fig
+
 def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None, 
                         suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                         darkmode=True, x_lim=None, y_lim=None, axis_limits=None, return_axes=False):
-    """
-    Revised plotting engine for Multi-Y Axis.
-    - Fixes 'ValueError: position' by shrinking X-axis domain to make room for extra axes.
-    - Supports proper line widths and dash styles.
-    """
+
     active_datasets = [d for d in list_of_datasets if d.select]
-    if not active_datasets:
-        print("No datasets selected.")
-        return None
+    if not active_datasets: return None
 
     y_list = y if isinstance(y, list) else [y]
     axis_limits = axis_limits or {}
     
-    # --- Grid Setup ---
     n_sets = len(active_datasets)
     if nrows is None and ncols is None:
         ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
         nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None:
-        nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None:
-        ncols = int(np.ceil(n_sets / nrows))
+    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
+    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
         
     sp_titles = [ds.title_format for ds in active_datasets]
-    
-    # We DO NOT set a huge right margin here anymore; we handle spacing via domain shrinking.
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=sp_titles, shared_xaxes=False)
 
     layout_args = {
         'template': "plotly_dark" if darkmode else "plotly_white",
         'title': {'text': suptitle if suptitle else f"Dataset Comparison", 'x': 0.5},
         'showlegend': True,
-        # Standard margin is usually fine now, or slight increase
         'margin': dict(r=50) 
     }
     if figsize:
@@ -582,22 +548,16 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         
     fig.update_layout(**layout_args)
     color_cycle = px.colors.qualitative.Plotly
-    
-    # Counter for generating new axis IDs (starts after the grid axes)
     next_free_axis_idx = (nrows * ncols) + 1
 
     for idx_ds, dataset in enumerate(active_datasets):
         row = (idx_ds // ncols) + 1
         col = (idx_ds % ncols) + 1
         
-        # Resolve Axis Names
         subplot_index = (row - 1) * ncols + col
         base_x_name = "xaxis" if subplot_index == 1 else f"xaxis{subplot_index}"
         base_y_name = "yaxis" if subplot_index == 1 else f"yaxis{subplot_index}"
         
-        # --- DOMAIN MANAGEMENT ---
-        # 1. Get original domain (default [0,1] if not found)
-        # make_subplots pre-populates these, so we can read them.
         try:
             old_domain = fig.layout[base_x_name].domain
             if not old_domain: old_domain = [0, 1]
@@ -605,71 +565,60 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             old_domain = [0, 1]
             
         d_start, d_end = old_domain
-        
-        # 2. Calculate space needed for EXTRA axes (vars 3, 4, etc.)
-        # Variable 1 is Left. Variable 2 is Right (anchored to X). 
-        # Variable 3+ need their own space.
         extras_count = max(0, len(y_list) - 2)
-        
-        # We reserve roughly 0.08 (8% of width) per extra axis
-        # You can tweak 'width_per_axis' if labels are getting cut off
         width_per_axis = 0.08 
         required_space = extras_count * width_per_axis
         
-        # 3. Shrink the X-axis to make room
         new_d_end = d_end - required_space
-        # Safety check: don't invert axis if too many vars
         if new_d_end <= d_start + 0.1: new_d_end = d_end 
-        
-        # Apply new domain to the subplot's X-axis
         fig.layout[base_x_name].domain = [d_start, new_d_end]
 
-        # --- DATA PREP ---
-        df = dataset.df.copy()
-        if dataset.order == 'index': df = df.sort_index()
-        elif dataset.order: df = df.sort_values(by=dataset.order)
+        # MICRO-SUBSET Logic
+        base_df = dataset.df
         
-        if x not in df.columns:
-            cols_upper = {c.upper(): c for c in df.columns}
+        if x not in base_df.columns:
+            cols_upper = {c.upper(): c for c in base_df.columns}
             if x.upper() in cols_upper: x_col = cols_upper[x.upper()]
             else: continue
-        else:
-            x_col = x
+        else: x_col = x
+
+        req_cols = [x_col] + [yi for yi in y_list if yi in base_df.columns]
+        valid_hover = [p for p in (display_parms or []) if p in base_df.columns]
+        req_cols.extend(valid_hover)
+        if dataset.order and dataset.order != 'index' and dataset.order in base_df.columns:
+            req_cols.append(dataset.order)
+            
+        req_cols = list(dict.fromkeys(req_cols))
+        df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
+        
+        if dataset.order == 'index': df = df.sort_index()
+        elif dataset.order: df = df.sort_values(by=dataset.order)
 
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
             
             var_color = color_cycle[idx_y % len(color_cycle)]
-            custom_data = df[[x_col, yi] + [c for c in (display_parms or []) if c in df.columns]]
+            custom_data = df[[x_col, yi] + valid_hover]
             ht = f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}<br>{yi}: %{{customdata[1]:.2f}}"
             specific_limit = axis_limits.get(yi, None)
 
-            # Styling
             line_dict = dict(color=var_color, width=dataset.linewidth)
             if dataset.linestyle: line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
 
             if idx_y == 0:
-                # --- PRIMARY AXIS (LEFT) ---
                 fig.add_trace(go.Scatter(
                     x=df[x_col], y=df[yi],
                     mode='lines+markers' if dataset.linestyle else 'markers',
                     name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
                     marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht
+                    line=line_dict, customdata=custom_data, hovertemplate=ht
                 ), row=row, col=col)
                 
-                # Update base Y-axis
                 u_dict = dict(title_text=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color), row=row, col=col)
                 if specific_limit: u_dict['range'] = specific_limit
                 fig.update_yaxes(**u_dict)
 
             elif idx_y == 1:
-                # --- SECONDARY AXIS (Standard Right) ---
-                # This one is "free" (doesn't need custom positioning), 
-                # it just anchors to the (now shrunk) X-axis and sits on the right edge.
-                
-                # We need a new axis object, but we anchor it to the subplot's x
                 curr_y_axis = f"yaxis{next_free_axis_idx}"
                 curr_y_ref = f"y{next_free_axis_idx}"
                 next_free_axis_idx += 1
@@ -679,69 +628,52 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                     mode='lines+markers' if dataset.linestyle else 'markers',
                     name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
                     marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht,
-                    xaxis=base_x_name.replace("axis", ""), # e.g. "x2"
-                    yaxis=curr_y_ref
-                ))
-                
-                layout_axis = dict(
-                    title=yi,
-                    title_font=dict(color=var_color),
-                    tickfont=dict(color=var_color),
-                    anchor=base_x_name.replace("axis", ""), # Anchors to x, so sits at x-domain end
-                    overlaying=base_y_name.replace("axis", ""), # y, y2, etc
-                    side='right',
-                    showgrid=False
-                )
-                if specific_limit: layout_axis['range'] = specific_limit
-                fig.update_layout({curr_y_axis: layout_axis})
-                
-            else:
-                # --- TERTIARY+ AXES (Floating Right) ---
-                # These sit in the empty space we created by shrinking the domain.
-                
-                curr_y_axis = f"yaxis{next_free_axis_idx}"
-                curr_y_ref = f"y{next_free_axis_idx}"
-                next_free_axis_idx += 1
-                
-                # We place them iteratively
-                extra_idx = idx_y - 1 # 1st extra, 2nd extra...
-                pos = new_d_end + (extra_idx * width_per_axis)
-                # Cap at 1.0 just in case
-                pos = min(0.99, pos) 
-                
-                fig.add_trace(go.Scatter(
-                    x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
-                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
-                    marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht,
+                    line=line_dict, customdata=custom_data, hovertemplate=ht,
                     xaxis=base_x_name.replace("axis", ""),
                     yaxis=curr_y_ref
                 ))
                 
                 layout_axis = dict(
-                    title=yi,
-                    title_font=dict(color=var_color),
-                    tickfont=dict(color=var_color),
-                    anchor="free",          # Free floating
-                    overlaying=base_y_name.replace("axis", ""),
-                    side='right',
-                    position=pos,           # Explicit position in [0, 1]
-                    showgrid=False
+                    title=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color),
+                    anchor=base_x_name.replace("axis", ""), overlaying=base_y_name.replace("axis", ""),
+                    side='right', showgrid=False
+                )
+                if specific_limit: layout_axis['range'] = specific_limit
+                fig.update_layout({curr_y_axis: layout_axis})
+                
+            else:
+                curr_y_axis = f"yaxis{next_free_axis_idx}"
+                curr_y_ref = f"y{next_free_axis_idx}"
+                next_free_axis_idx += 1
+                
+                extra_idx = idx_y - 1 
+                pos = min(0.99, new_d_end + (extra_idx * width_per_axis))
+                
+                fig.add_trace(go.Scatter(
+                    x=df[x_col], y=df[yi],
+                    mode='lines+markers' if dataset.linestyle else 'markers',
+                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
+                    marker=dict(color=var_color, size=dataset.markersize or 6),
+                    line=line_dict, customdata=custom_data, hovertemplate=ht,
+                    xaxis=base_x_name.replace("axis", ""),
+                    yaxis=curr_y_ref
+                ))
+                
+                layout_axis = dict(
+                    title=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color),
+                    anchor="free", overlaying=base_y_name.replace("axis", ""),
+                    side='right', position=pos, showgrid=False
                 )
                 if specific_limit: layout_axis['range'] = specific_limit
                 fig.update_layout({curr_y_axis: layout_axis})
 
-        # Final cleanup for the subplot
         fig.update_xaxes(title_text=x, showgrid=True, row=row, col=col)
         if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
 
     if return_axes: return fig 
     fig.show()
     return fig
+
 
 def unibar(list_of_datasets, x, y, barmode='group', color=None, 
            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
@@ -774,7 +706,7 @@ def unibar(list_of_datasets, x, y, barmode='group', color=None,
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -884,7 +816,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -1008,7 +940,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         use_color = color if color else ds.color
 
@@ -1095,7 +1027,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_x, xi in enumerate(x_list):
             if xi not in df.columns: continue
@@ -1182,7 +1114,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     fig.update_layout(**layout_args)
 
     for idx_ds, ds in enumerate(active_ds):
-        df = ds.df.copy()
+        df = ds.df
         if x not in df.columns or y not in df.columns: 
             continue
 
@@ -1284,7 +1216,7 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df.copy()
+        df = ds.df
         
         if x not in df.columns or y not in df.columns: continue
 
@@ -1983,6 +1915,8 @@ class UnichartNotebook:
                 'sets'           - Creates a subplot for each Dataset.
                                 Best for looking at all metrics for a specific dataset.
             """
+            self._clear_last_fig()
+
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x = x
@@ -2126,6 +2060,8 @@ class UnichartNotebook:
             """
             Unified interface for Bar Charts.
             """
+            self._clear_last_fig()
+
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x, self.last_y = x, y
@@ -2204,6 +2140,8 @@ class UnichartNotebook:
             """
             Unified interface for Box Plots.
             """
+            self._clear_last_fig()
+
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x, self.last_y = x, y
@@ -2301,6 +2239,8 @@ class UnichartNotebook:
             histnorm : str
                 '' (default, count), 'percent', 'probability', 'density', 'probability density'
             """
+            self._clear_last_fig()
+
             if x is None: x = self.last_x
             self.last_x = x
             
@@ -2338,6 +2278,7 @@ class UnichartNotebook:
                 ncontours=None,
                 suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
             """
+
             Unified interface for Contour Plots.
             
             Parameters:
@@ -2358,6 +2299,9 @@ class UnichartNotebook:
             suptitle : str, optional
                 A title for the entire figure.
             """
+
+            self._clear_last_fig()
+
             if x is None: x = self.last_x
             if y is None: y = self.last_y
             self.last_x, self.last_y = x, y
@@ -2438,7 +2382,7 @@ class UnichartNotebook:
             if not valid_cols:
                 continue
                 
-            subset = ds.df[valid_cols].copy()
+            subset = ds.df[valid_cols]
             # Add a source column to identify the dataset
             subset.insert(0, 'Dataset', ds.title)
             combined_dfs.append(subset)
@@ -2783,38 +2727,89 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Interactive "GUI" Replacement
     # ------------------------------------------------------------------
+    def _clear_last_fig(self):
+        """
+        Actively hollows out the massive JSON payload of the previous Plotly figure 
+        before dropping the reference. This prevents rapid RAM inflation (high-water marks) 
+        during tight plotting loops.
+        """
+        if self.last_fig is not None:
+            # Empty the heavy data payloads
+            self.last_fig.data = []
+            self.last_fig.layout = {}
+            # Drop the pointer
+            self.last_fig = None
+
     def _refresh_widgets(self):
-        """Rebuilds the dataset management widget list."""
+        """
+        Rebuilds the dataset management widget list, cleanly destroying 
+        old widgets to prevent memory leaks in the kernel and the browser.
+        """
+        
+        # 1. THE PURGE: Cleanly destroy existing widgets
+        # Simply unassigning them from .children leaves them in memory.
+        if hasattr(self, 'dataset_widget_container') and self.dataset_widget_container.children:
+            for child in self.dataset_widget_container.children:
+                # HBox is a container. We must dig down and close its children first.
+                if hasattr(child, 'children'):
+                    for sub_child in child.children:
+                        sub_child.close()
+                # Close the parent HBox/HTML widget
+                child.close()
+                
         items = []
         
         # Header
         items.append(widgets.HTML("<b>Dataset Manager</b>"))
         
+        # 2. DECOUPLED CALLBACKS: Define these outside the loop
+        # This prevents creating a new function object in memory for every dataset.
+        def update_select(change, dataset):
+            dataset.select = change['new']
+
+        def update_color(change, dataset):
+            dataset.color = change['new']
+
+        # 3. WIDGET REBUILD
         for i, ds in enumerate(self.uset):
-            # Checkbox for Selection
-            chk = widgets.Checkbox(value=ds.select, description=f"{i}: {ds.title}", indent=False, layout=widgets.Layout(width='300px'))
             
-            # Observe changes to update dataset object immediately
-            def on_change(change, dataset=ds):
-                dataset.select = change['new']
-            chk.observe(on_change, names='value')
+            # Checkbox for Selection
+            chk = widgets.Checkbox(
+                value=ds.select, 
+                description=f"{i}: {ds.title}", 
+                indent=False, 
+                layout=widgets.Layout(width='300px')
+            )
+            
+            # functools.partial safely binds the specific dataset to the callback 
+            # without capturing the entire local scope in a messy closure.
+            chk.observe(functools.partial(update_select, dataset=ds), names='value')
             
             # Metadata display
-            details = widgets.Label(value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", layout=widgets.Layout(width='200px'))
+            details = widgets.Label(
+                value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", 
+                layout=widgets.Layout(width='200px')
+            )
             
             # Color Picker
-            # Try to convert mpl color/plotly color to hex for widget
-            # Simple fallback to white if unknown format
-            cp = widgets.ColorPicker(concise=True, value='blue', layout=widgets.Layout(width='30px'))
+            # Fixed a bug from the original code: it was hardcoded to 'blue'. 
+            # Now it dynamically pulls the actual dataset color.
+            current_color = ds.color if isinstance(ds.color, str) else 'blue'
+            cp = widgets.ColorPicker(
+                concise=True, 
+                value=current_color, 
+                layout=widgets.Layout(width='30px')
+            )
             
-            def on_color_change(change, dataset=ds):
-                dataset.color = change['new']
-            cp.observe(on_color_change, names='value')
+            cp.observe(functools.partial(update_color, dataset=ds), names='value')
 
+            # Group and append
             row = widgets.HBox([chk, cp, details])
             items.append(row)
             
+        # Assign the fresh batch of widgets to the container
         self.dataset_widget_container.children = tuple(items)
+        
 
     def gui(self):
         """Displays the interactive dataset manager widgets."""
