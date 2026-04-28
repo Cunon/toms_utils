@@ -394,11 +394,30 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
+    # Pre-pass: discover unique numeric hue columns and assign each a named coloraxis
+    numeric_hue_info = {}  # hue_col -> {'ca_name', 'palette', 'lim'}
+    for _ds in list_of_datasets:
+        if not _ds.select: continue
+        _fmt = _ds.get_format_dict()
+        _cur_hue = _fmt.get('hue') or hue
+        if not _cur_hue or _cur_hue in numeric_hue_info: continue
+        _df = _ds.df
+        if _cur_hue in _df.columns and pd.api.types.is_numeric_dtype(_df[_cur_hue]):
+            _idx = len(numeric_hue_info) + 1
+            numeric_hue_info[_cur_hue] = {
+                'ca_name': 'coloraxis' if _idx == 1 else f'coloraxis{_idx}',
+                'palette': _fmt.get('hue_palette', 'Jet'),
+                'lim': axis_limits.get(_cur_hue),
+            }
+
+    right_margin = max(80, len(numeric_hue_info) * 90)
+
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
         title={'text': suptitle or f"{x} vs {[str(yi) for yi in y_list]}", 'x': 0.5, 'xanchor': 'center'},
-        showlegend=(legend != 'off')
+        showlegend=(legend != 'off'),
+        margin=dict(r=right_margin),
     ))
 
     for dataset in list_of_datasets:
@@ -488,13 +507,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             if cur_hue and cur_hue in df.columns:
                 hue_data = df[cur_hue]
                 if pd.api.types.is_numeric_dtype(hue_data):
-                    hue_lim = axis_limits.get(cur_hue)
+                    info = numeric_hue_info.get(cur_hue, {})
                     marker_dict['color'] = hue_data
-                    marker_dict['colorscale'] = fmt.get('hue_palette', 'Jet')
-                    marker_dict['colorbar'] = dict(title=cur_hue)
-                    if hue_lim:
-                        marker_dict['cmin'] = hue_lim[0]
-                        marker_dict['cmax'] = hue_lim[1]
+                    marker_dict['coloraxis'] = info.get('ca_name', 'coloraxis')
                 else:
                     hue_series = hue_data.astype('category')
                     marker_dict['color'] = hue_series.cat.codes
@@ -523,10 +538,25 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                     opacity=0.7, hoverinfo='skip', showlegend=False
                 ), row=row, col=col)
 
+    # Define a separate colorbar in the layout for each unique numeric hue column
+    coloraxis_updates = {}
+    for hue_col, info in numeric_hue_info.items():
+        idx = list(numeric_hue_info.keys()).index(hue_col)
+        ca_def = dict(
+            colorscale=info['palette'],
+            colorbar=dict(title=hue_col, x=1.02 + idx * 0.12, thickness=15),
+        )
+        if info['lim']:
+            ca_def['cmin'] = info['lim'][0]
+            ca_def['cmax'] = info['lim'][1]
+        coloraxis_updates[info['ca_name']] = ca_def
+    if coloraxis_updates:
+        fig.update_layout(**coloraxis_updates)
+
     for idx_y, yi in enumerate(y_list):
         row = idx_y // ncols + 1
         col = idx_y % ncols + 1
-        
+
         axis_title = ylabel if ylabel else yi
         x_axis_title = xlabel if xlabel else x
         
@@ -1737,16 +1767,23 @@ class UnichartNotebook:
     def line(self, column, level, color='red', dash='dash'):
         """Add a vertical or horizontal line to the next plot."""
         if level == 'clear':
-            self.lines.pop(column, None)
+            if column == 'all':
+                self.lines.clear()
+            else:
+                self.lines.pop(column, None)
             return
         
         if column not in self.lines: self.lines[column] = []
-        self.lines[column].append({'level': level, 'color': color, 'dash': dash})
+        plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
+        self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
     def highlight(self, column, range_tuple, color='yellow', opacity=0.2):
         """Add a highlighted region to the next plot."""
         if range_tuple == 'clear':
-            self.highlights.pop(column, None)
+            if column == 'all':
+                self.highlights.clear()
+            else:
+                self.highlights.pop(column, None)
             return
             
         if column not in self.highlights: self.highlights[column] = []
