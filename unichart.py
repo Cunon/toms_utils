@@ -399,22 +399,126 @@ def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', 
     y_interp = f(x_in)
     return y_interp
 
-def _calculate_regression(df, x_col, y_col, order):
-    """Internal helper to calculate polynomial regression lines."""
+def _parse_reg_spec(spec):
+    """Normalize reg_order spec into (kind, param)."""
+    if not spec:                                      # None, False, 0, ''
+        return None, None
+    if isinstance(spec, bool):                        # bool sneaks past 'not spec'
+        return None, None
+    if isinstance(spec, numbers.Number):
+        return ('poly', int(spec)) if spec > 0 else (None, None)
+
+    aliases = {
+        'linear': ('poly', 1), 'lin': ('poly', 1),
+        'quadratic': ('poly', 2), 'cubic': ('poly', 3),
+        'poly': ('poly', None),
+        'log': ('log', None), 'logarithmic': ('log', None),
+        'exp': ('exp', None), 'exponential': ('exp', None),
+        'power': ('power', None), 'pow': ('power', None),
+        'lowess': ('lowess', 0.3), 'loess': ('lowess', 0.3),
+        'spline': ('spline', 3), 'cubic_spline': ('spline', 3),
+        'ma': ('ma', None), 'moving_average': ('ma', None), 'rolling': ('ma', None),
+    }
+
+    if isinstance(spec, str):
+        s = spec.lower().strip()
+        if s in aliases: return aliases[s]
+        if s.startswith('poly'):
+            try: return 'poly', int(s[4:])
+            except ValueError: pass
+        raise ValueError(f"Unknown regression type: {spec!r}")
+
+    if isinstance(spec, (tuple, list)) and len(spec) == 2:
+        kind, param = spec
+        kind = str(kind).lower().strip()
+        if kind in aliases:
+            return aliases[kind][0], param
+        raise ValueError(f"Unknown regression kind: {kind!r}")
+
+    raise ValueError(f"Invalid reg_order spec: {spec!r}")
+
+
+def _calculate_regression(df, x_col, y_col, spec):
+    """
+    Compute a regression curve. Returns (x_array, y_array, label).
+    Returns (None, None, None) when spec is falsy or fit cannot be computed.
+    """
+    kind, param = _parse_reg_spec(spec)
+    if kind is None:
+        return None, None, None
+
     df_clean = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
-    x = df_clean[x_col]
-    y = df_clean[y_col]
-    
-    if len(x) < order + 1:
-        return x, y * np.nan
-        
-    z = np.polyfit(x, y, order)
-    p = np.poly1d(z)
-    
-    # Create smooth line
-    x_lin = np.linspace(x.min(), x.max(), 100)
-    y_lin = p(x_lin)
-    return x_lin, y_lin
+    x = df_clean[x_col].to_numpy(dtype=float)
+    y = df_clean[y_col].to_numpy(dtype=float)
+    if len(x) < 2:
+        return None, None, None
+
+    x_lin = np.linspace(x.min(), x.max(), 200)
+
+    try:
+        if kind == 'poly':
+            order = int(param) if param else 1
+            if len(x) < order + 1:
+                return None, None, None
+            p = np.poly1d(np.polyfit(x, y, order))
+            label = 'Linear' if order == 1 else f'LS{order}'
+            return x_lin, p(x_lin), label
+
+        if kind == 'log':
+            mask = x > 0
+            if mask.sum() < 2: return None, None, None
+            a, b = np.polyfit(np.log(x[mask]), y[mask], 1)
+            y_lin = np.full_like(x_lin, np.nan)
+            pos = x_lin > 0
+            y_lin[pos] = a * np.log(x_lin[pos]) + b
+            return x_lin, y_lin, 'Log'
+
+        if kind == 'exp':
+            mask = y > 0
+            if mask.sum() < 2: return None, None, None
+            b, log_a = np.polyfit(x[mask], np.log(y[mask]), 1)
+            return x_lin, np.exp(log_a) * np.exp(b * x_lin), 'Exp'
+
+        if kind == 'power':
+            mask = (x > 0) & (y > 0)
+            if mask.sum() < 2: return None, None, None
+            b, log_a = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
+            y_lin = np.full_like(x_lin, np.nan)
+            pos = x_lin > 0
+            y_lin[pos] = np.exp(log_a) * np.power(x_lin[pos], b)
+            return x_lin, y_lin, 'Power'
+
+        if kind == 'lowess':
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess
+            except ImportError:
+                warnings.warn("LOWESS requires statsmodels. Install with `pip install statsmodels`.")
+                return None, None, None
+            frac = float(param) if param is not None else 0.3
+            res = lowess(y, x, frac=frac, return_sorted=True)
+            return res[:, 0], res[:, 1], f'LOWESS({frac:.2f})'
+
+        if kind == 'spline':
+            from scipy.interpolate import UnivariateSpline
+            k = max(1, min(5, int(param) if param else 3))
+            ux, idx = np.unique(x, return_index=True)
+            uy = y[idx]
+            if len(ux) < k + 1:
+                return None, None, None
+            spl = UnivariateSpline(ux, uy, k=k)         # default smoothing
+            return x_lin, spl(x_lin), f'Spline{k}'
+
+        if kind == 'ma':
+            window = int(param) if param else max(3, len(x) // 20)
+            window = max(2, min(window, len(x)))
+            ma = pd.Series(y).rolling(window=window, center=True, min_periods=1).mean().to_numpy()
+            return x, ma, f'MA({window})'
+
+    except Exception as e:
+        warnings.warn(f"Regression '{kind}' failed: {e}")
+        return None, None, None
+
+    return None, None, None
 
 # -----------------------------------------------------------------------------
 # Main Plotting Functions
@@ -582,15 +686,16 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 showlegend=(idx_p == 0)
             ), row=row, col=col)
 
-            if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
-                rx, ry = _calculate_regression(df, x_col, yi, cur_reg_order)
-                fig.add_trace(go.Scatter(
-                    x=rx, y=ry, mode='lines',
-                    name=f"{cur_idx}: {cur_title} Fit LS {cur_reg_order}",
-                    legendgroup=f"group_{cur_idx}",
-                    line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
-                    opacity=0.7, hoverinfo='skip', showlegend=False
-                ), row=row, col=col)
+            if cur_reg_order:
+                rx, ry, fit_label = _calculate_regression(df, x_col, yi, cur_reg_order)
+                if rx is not None:
+                    fig.add_trace(go.Scatter(
+                        x=rx, y=ry, mode='lines',
+                        name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
+                        legendgroup=f"group_{cur_idx}",
+                        line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
+                        opacity=0.7, hoverinfo='skip', showlegend=False
+                    ), row=row, col=col)
 
     # Define a separate colorbar in the layout for each unique numeric hue column
     coloraxis_updates = {}
@@ -1730,12 +1835,30 @@ class UnichartNotebook:
 
     def reg_order(self, uset_slice, order):
         """
-        Set the polynomial regression order for the specified dataset(s).
+        Set a regression/trendline for the specified dataset(s).
 
         Args:
             uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            order (int or None): Polynomial degree (e.g., 1 for linear, 2 for quadratic).
-                                 Pass None to remove the regression line.
+            order: Regression specification. Acceptable inputs:
+
+                None / False / 0  — remove the regression line
+
+                int               — polynomial of that degree (e.g., 1=linear, 2=quadratic)
+
+                str (name)        — named regression type:
+                    'linear' / 'lin'            — linear (poly degree 1)
+                    'quadratic'                 — polynomial degree 2
+                    'cubic'                     — polynomial degree 3
+                    'poly<N>'                   — polynomial degree N (e.g., 'poly4')
+                    'log' / 'logarithmic'       — logarithmic (requires x > 0)
+                    'exp' / 'exponential'       — exponential (requires y > 0)
+                    'power' / 'pow'             — power law (requires x, y > 0)
+                    'lowess' / 'loess'          — LOWESS smoother (frac=0.3; needs statsmodels)
+                    'spline' / 'cubic_spline'   — cubic spline
+                    'ma' / 'moving_average' / 'rolling' — moving average
+
+                tuple (kind, param)  — explicit kind + parameter, e.g., ('poly', 3),
+                                       ('lowess', 0.5), ('ma', 10)
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.reg_order = order
