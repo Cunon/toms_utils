@@ -31,6 +31,23 @@ LINESTYLE_MAP_MPL_TO_PLOTLY = {
     'None': None, ' ': None, '': None
 }
 
+FONT_SIZE_MAP = {
+    'xs':     8,
+    'xsmall': 8,
+    'sm':     10,
+    'small':  10,
+    'md':     12,
+    'medium': 12,
+    'base':   12,
+    'lg':     14,
+    'large':  14,
+    'xl':     18,
+    'xlarge': 18,
+    'xxl':    24,
+    '2xl':    24,
+    'huge':   32,
+}
+
 def get_plotly_marker(mpl_marker):
     return MARKER_MAP_MPL_TO_PLOTLY.get(mpl_marker, 'circle')
 
@@ -98,9 +115,25 @@ def _calc_grid(n, nrows, ncols):
     return nrows, ncols
 
 def _base_layout(darkmode, suptitle, figsize, **extra):
+    # Anchor title to the container (not the plot area) so a horizontal legend
+    # placed at y=1.02 (paper coords, just above the plot) always sits below it.
+    title_defaults = {'x': 0.5, 'yref': 'container', 'y': 0.99, 'yanchor': 'top'}
+    incoming_title = extra.pop('title', {})
+    if isinstance(incoming_title, str):
+        incoming_title = {'text': incoming_title}
+    if 'text' not in incoming_title:
+        incoming_title['text'] = suptitle
+    merged_title = {**title_defaults, **incoming_title}
+
+    # Reserve enough top margin for both title and a horizontal legend row.
+    default_margin = {'t': 100}
+    incoming_margin = extra.pop('margin', {})
+    merged_margin = {**default_margin, **incoming_margin}
+
     args = {
         'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle, 'x': 0.5},
+        'title': merged_title,
+        'margin': merged_margin,
         **extra
     }
     if figsize:
@@ -120,6 +153,13 @@ def _show_or_return(fig, return_axes):
         return fig
     fig.show()
     return fig
+
+def _subplot_refs(row, col, ncols):
+    """Return the (xref, yref) axis name strings for a subplot at (row, col) in an ncols grid."""
+    idx = (row - 1) * ncols + col
+    xref = 'x' if idx == 1 else f'x{idx}'
+    yref = 'y' if idx == 1 else f'y{idx}'
+    return xref, yref
 
 # -----------------------------------------------------------------------------
 # Dataset Class
@@ -388,11 +428,25 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             axis_limits=None):
 
     axis_limits = axis_limits or {}
+    x_list = x if isinstance(x, list) else [x]
     y_list = y if isinstance(y, list) else [y]
-    n_y = len(y_list)
-    if n_y == 0: raise ValueError("y must contain at least one column.")
 
-    nrows, ncols = _calc_grid(n_y, nrows, ncols)
+    if len(x_list) == len(y_list):
+        pairs = list(zip(x_list, y_list))
+    elif len(x_list) == 1:
+        pairs = [(x_list[0], yi) for yi in y_list]
+    elif len(y_list) == 1:
+        pairs = [(xi, y_list[0]) for xi in x_list]
+    else:
+        raise ValueError(
+            f"x and y must be the same length, or one must be a single value. "
+            f"Got len(x)={len(x_list)}, len(y)={len(y_list)}."
+        )
+
+    n_plots = len(pairs)
+    if n_plots == 0: raise ValueError("At least one x/y pair is required.")
+
+    nrows, ncols = _calc_grid(n_plots, nrows, ncols)
 
     # Pre-pass: discover unique numeric hue columns and assign each a named coloraxis
     numeric_hue_info = {}  # hue_col -> {'ca_name', 'palette', 'lim'}
@@ -415,7 +469,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
-        title={'text': suptitle or f"{x} vs {[str(yi) for yi in y_list]}", 'x': 0.5, 'xanchor': 'center'},
+        title={'text': suptitle or (f"{x} vs {[str(yi) for yi in y_list]}" if len(x_list) == 1 else f"{x_list} vs {y_list}"), 'x': 0.5, 'xanchor': 'center'},
         showlegend=(legend != 'off'),
         margin=dict(r=right_margin),
     ))
@@ -439,20 +493,20 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
-        for idx_y, yi in enumerate(y_list):
-            row = idx_y // ncols + 1
-            col = idx_y % ncols + 1
+        for idx_p, (x_name, yi) in enumerate(pairs):
+            row = idx_p // ncols + 1
+            col = idx_p % ncols + 1
 
             if yi not in base_df.columns: continue
 
             # X-Column Resolution
-            if x not in base_df.columns:
+            if x_name not in base_df.columns:
                 cols_upper = {c.upper(): c for c in base_df.columns}
-                x_key = cols_upper.get(str(x).upper())
+                x_key = cols_upper.get(str(x_name).upper())
                 if not x_key: continue
                 x_col = x_key
             else:
-                x_col = x
+                x_col = x_name
 
             # MICRO-SUBSET: Build list of specifically required columns
             req_cols = [x_col, yi]
@@ -525,7 +579,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 legendgroup=f"group_{cur_idx}",
                 marker=marker_dict, line=line_dict,
                 customdata=custom_data, hovertemplate=ht,
-                showlegend=(idx_y == 0)
+                showlegend=(idx_p == 0)
             ), row=row, col=col)
 
             if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
@@ -553,22 +607,21 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     if coloraxis_updates:
         fig.update_layout(**coloraxis_updates)
 
-    for idx_y, yi in enumerate(y_list):
-        row = idx_y // ncols + 1
-        col = idx_y % ncols + 1
+    for idx_p, (x_name, yi) in enumerate(pairs):
+        row = idx_p // ncols + 1
+        col = idx_p % ncols + 1
 
         axis_title = ylabel if ylabel else yi
-        x_axis_title = xlabel if xlabel else x
-        
+        x_axis_title = xlabel if xlabel else x_name
+
         fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
         fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
 
-    for idx_y, yi in enumerate(y_list):
-        row = idx_y // ncols + 1
-        col = idx_y % ncols + 1
+    for idx_p, (x_name, yi) in enumerate(pairs):
+        row = idx_p // ncols + 1
+        col = idx_p % ncols + 1
         if y_lim: fig.update_yaxes(range=y_lim, row=row, col=col)
-    
-    if x_lim: fig.update_xaxes(range=x_lim)
+        if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
     if not grid:
         fig.update_xaxes(showgrid=False)
         fig.update_yaxes(showgrid=False)
@@ -1675,6 +1728,18 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds.plot_type = type_val
 
+    def reg_order(self, uset_slice, order):
+        """
+        Set the polynomial regression order for the specified dataset(s).
+
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            order (int or None): Polynomial degree (e.g., 1 for linear, 2 for quadratic).
+                                 Pass None to remove the regression line.
+        """
+        for ds in self._get_uset_slice(uset_slice):
+            ds.reg_order = order
+
     def set_display_parms(self, uset_slice, parms):
         """
         Update the display parameters (columns shown on hover) for the specified dataset(s).
@@ -1850,8 +1915,14 @@ class UnichartNotebook:
         def _validate(name, value):
             if value is None:
                 return None
+            if isinstance(value, str):
+                resolved = FONT_SIZE_MAP.get(value.lower())
+                if resolved is None:
+                    valid = ', '.join(sorted(FONT_SIZE_MAP))
+                    raise ValueError(f"{name}: unknown size name '{value}'. Valid names: {valid}")
+                value = resolved
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"{name} must be numeric, got {type(value).__name__}")
+                raise TypeError(f"{name} must be numeric or a size name, got {type(value).__name__}")
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
             if value > 72:
@@ -1975,8 +2046,8 @@ class UnichartNotebook:
                     ncols=ncols,
                     nrows=nrows,
                     darkmode=self.darkmode,
-                    x_lim=self.axis_limits.get(x),
-                    y_lim=None, 
+                    x_lim=self.axis_limits.get(x) if isinstance(x, str) else None,
+                    y_lim=None,
                     axis_limits=self.axis_limits, 
                     return_axes=True 
                 )
@@ -2006,11 +2077,22 @@ class UnichartNotebook:
             if fig is None: return
 
             # Calculate grid dimensions to know where to place lines/highlights
+            x_list = x if isinstance(x, list) else [x]
             y_list = y if isinstance(y, list) else [y]
             active_sets = [d for d in self.uset if d.select]
-            
+
+            # Rebuild pairs the same way uniplot does
+            if len(x_list) == len(y_list):
+                plot_pairs = list(zip(x_list, y_list))
+            elif len(x_list) == 1:
+                plot_pairs = [(x_list[0], yi) for yi in y_list]
+            elif len(y_list) == 1:
+                plot_pairs = [(xi, y_list[0]) for xi in x_list]
+            else:
+                plot_pairs = [(x_list[0], yi) for yi in y_list]
+
             if mode == 'vars':
-                n_items = len(y_list)
+                n_items = len(plot_pairs)
             else:
                 n_items = len(active_sets)
 
@@ -2023,62 +2105,89 @@ class UnichartNotebook:
                 calc_ncols = ncols
             calc_ncols = max(1, calc_ncols)
 
-            # Decoration Helper
-            def apply_to_all_subplots(func, **kwargs):
-                for i in range(n_items):
-                    r = (i // calc_ncols) + 1
-                    c = (i % calc_ncols) + 1
-                    func(row=r, col=c, **kwargs)
-
             # --- LINES ---
-            for col_name, lines in self.lines.items():
-                if col_name == x:
-                    # Vertical lines on X axis apply to everyone
-                    for l in lines:
-                        fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
-                elif col_name in y_list:
-                    # Horizontal lines differ based on mode
+            # Per-subplot lines use add_shape with explicit axis refs (universally compatible).
+            # Global lines (sets mode) use add_vline/add_hline without row/col.
+            for col_name, col_lines in self.lines.items():
+                if col_name in x_list:
                     if mode == 'vars':
-                        # Only apply to the specific subplot for this variable
-                        for idx, yi in enumerate(y_list):
+                        for idx, (xi, yi) in enumerate(plot_pairs):
+                            if xi == col_name:
+                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                                xref, yref = _subplot_refs(r, c, calc_ncols)
+                                for l in col_lines:
+                                    fig.add_shape(
+                                        type='line',
+                                        x0=l['level'], x1=l['level'], y0=0, y1=1,
+                                        xref=xref, yref=f'{yref} domain',
+                                        line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                    )
+                    else:
+                        for l in col_lines:
+                            fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
+                if col_name in y_list:
+                    if mode == 'vars':
+                        for idx, (xi, yi) in enumerate(plot_pairs):
                             if yi == col_name:
                                 r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                for l in lines:
-                                    fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'], row=r, col=c)
-                    else: # mode == 'sets'
-                        # Variable exists on ALL subplots
-                        for l in lines:
-                            apply_to_all_subplots(fig.add_hline, y=l['level'], line_dash=l['dash'], line_color=l['color'])
+                                xref, yref = _subplot_refs(r, c, calc_ncols)
+                                for l in col_lines:
+                                    fig.add_shape(
+                                        type='line',
+                                        x0=0, x1=1, y0=l['level'], y1=l['level'],
+                                        xref=f'{xref} domain', yref=yref,
+                                        line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                    )
+                    else:
+                        for l in col_lines:
+                            fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'])
 
             # --- HIGHLIGHTS ---
             for col_name, hls in self.highlights.items():
-                if col_name == x:
-                    for h in hls:
-                        fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'], 
-                                    opacity=h['opacity'], layer="below", line_width=0)
-                elif col_name in y_list:
+                if col_name in x_list:
                     if mode == 'vars':
-                        for idx, yi in enumerate(y_list):
+                        for idx, (xi, yi) in enumerate(plot_pairs):
+                            if xi == col_name:
+                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                                xref, yref = _subplot_refs(r, c, calc_ncols)
+                                for h in hls:
+                                    fig.add_shape(
+                                        type='rect',
+                                        x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
+                                        xref=xref, yref=f'{yref} domain',
+                                        fillcolor=h['color'], opacity=h['opacity'],
+                                        layer='below', line_width=0
+                                    )
+                    else:
+                        for h in hls:
+                            fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
+                                        opacity=h['opacity'], layer='below', line_width=0)
+                if col_name in y_list:
+                    if mode == 'vars':
+                        for idx, (xi, yi) in enumerate(plot_pairs):
                             if yi == col_name:
                                 r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                                xref, yref = _subplot_refs(r, c, calc_ncols)
                                 for h in hls:
-                                    fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'], 
-                                                opacity=h['opacity'], layer="below", line_width=0, row=r, col=c)
-                    else: # mode == 'sets'
+                                    fig.add_shape(
+                                        type='rect',
+                                        x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
+                                        xref=f'{xref} domain', yref=yref,
+                                        fillcolor=h['color'], opacity=h['opacity'],
+                                        layer='below', line_width=0
+                                    )
+                    else:
                         for h in hls:
-                            apply_to_all_subplots(fig.add_hrect, y0=h['range'][0], y1=h['range'][1], 
-                                                fillcolor=h['color'], opacity=h['opacity'], layer="below", line_width=0)
+                            fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
+                                        opacity=h['opacity'], layer='below', line_width=0)
 
-            # X limits
-            if x in self.axis_limits:
-                fig.update_xaxes(range=self.axis_limits[x])
-
-            # Y limits
-            # In 'sets' mode, limits were already applied inside uniplot_per_dataset.
+            # X/Y limits (vars mode: applied per subplot via pairs; sets mode: global)
             if mode == 'vars':
-                for idx, yi in enumerate(y_list):
+                for idx, (xi, yi) in enumerate(plot_pairs):
+                    r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                    if xi in self.axis_limits:
+                        fig.update_xaxes(range=self.axis_limits[xi], row=r, col=c)
                     if yi in self.axis_limits:
-                        r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
                         fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
             fig = self._apply_fonts(fig)
