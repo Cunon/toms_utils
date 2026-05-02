@@ -2228,81 +2228,10 @@ class UnichartNotebook:
                 calc_ncols = ncols
             calc_ncols = max(1, calc_ncols)
 
-            # --- LINES ---
-            # Per-subplot lines use add_shape with explicit axis refs (universally compatible).
-            # Global lines (sets mode) use add_vline/add_hline without row/col.
-            for col_name, col_lines in self.lines.items():
-                if col_name in x_list:
-                    if mode == 'vars':
-                        for idx, (xi, yi) in enumerate(plot_pairs):
-                            if xi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                xref, yref = _subplot_refs(r, c, calc_ncols)
-                                for l in col_lines:
-                                    fig.add_shape(
-                                        type='line',
-                                        x0=l['level'], x1=l['level'], y0=0, y1=1,
-                                        xref=xref, yref=f'{yref} domain',
-                                        line=dict(color=l['color'], dash=l['dash'] or 'solid')
-                                    )
-                    else:
-                        for l in col_lines:
-                            fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
-                if col_name in y_list:
-                    if mode == 'vars':
-                        for idx, (xi, yi) in enumerate(plot_pairs):
-                            if yi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                xref, yref = _subplot_refs(r, c, calc_ncols)
-                                for l in col_lines:
-                                    fig.add_shape(
-                                        type='line',
-                                        x0=0, x1=1, y0=l['level'], y1=l['level'],
-                                        xref=f'{xref} domain', yref=yref,
-                                        line=dict(color=l['color'], dash=l['dash'] or 'solid')
-                                    )
-                    else:
-                        for l in col_lines:
-                            fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'])
-
-            # --- HIGHLIGHTS ---
-            for col_name, hls in self.highlights.items():
-                if col_name in x_list:
-                    if mode == 'vars':
-                        for idx, (xi, yi) in enumerate(plot_pairs):
-                            if xi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                xref, yref = _subplot_refs(r, c, calc_ncols)
-                                for h in hls:
-                                    fig.add_shape(
-                                        type='rect',
-                                        x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
-                                        xref=xref, yref=f'{yref} domain',
-                                        fillcolor=h['color'], opacity=h['opacity'],
-                                        layer='below', line_width=0
-                                    )
-                    else:
-                        for h in hls:
-                            fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
-                                        opacity=h['opacity'], layer='below', line_width=0)
-                if col_name in y_list:
-                    if mode == 'vars':
-                        for idx, (xi, yi) in enumerate(plot_pairs):
-                            if yi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                xref, yref = _subplot_refs(r, c, calc_ncols)
-                                for h in hls:
-                                    fig.add_shape(
-                                        type='rect',
-                                        x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
-                                        xref=f'{xref} domain', yref=yref,
-                                        fillcolor=h['color'], opacity=h['opacity'],
-                                        layer='below', line_width=0
-                                    )
-                    else:
-                        for h in hls:
-                            fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
-                                        opacity=h['opacity'], layer='below', line_width=0)
+            fig = self._apply_decorations(
+                fig, x_list, y_list, mode, calc_ncols,
+                plot_pairs if mode == 'vars' else None
+            )
 
             # X/Y limits (vars mode: applied per subplot via pairs; sets mode: global)
             if mode == 'vars':
@@ -2345,6 +2274,7 @@ class UnichartNotebook:
                 )
                 # dataset_x handles its own axis limits internally, so we return early
                 if fig:
+                    fig = self._apply_decorations(fig, [], y_list, 'global', 1)
                     fig = self._apply_fonts(fig)
                     if suppress_legends:
                         fig.update_traces(visible='legendonly')
@@ -2390,6 +2320,10 @@ class UnichartNotebook:
                             c = (idx % calc_ncols) + 1
                             fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
+                dec_mode = 'sets' if by in ['sets', 'datasets'] else 'vars'
+                dec_items = [(x, yi) for yi in y_list] if dec_mode == 'vars' else None
+                fig = self._apply_decorations(fig, [], y_list, dec_mode, calc_ncols, dec_items)
+
                 # --- 3. FINAL POLISH ---
                 fig = self._apply_fonts(fig)
                 if suppress_legends:
@@ -2419,11 +2353,12 @@ class UnichartNotebook:
             # --- 1. DISPATCH BLOCK ---
             if by == 'dataset_x':
                 fig = unibox_datasets_as_x(
-                    list_of_datasets=self.uset, y=y_list, boxmode=boxmode, 
-                    points=points, notched=notched, suptitle=suptitle or self.suptitle, 
+                    list_of_datasets=self.uset, y=y_list, boxmode=boxmode,
+                    points=points, notched=notched, suptitle=suptitle or self.suptitle,
                     figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
                 )
                 if fig:
+                    fig = self._apply_decorations(fig, [], y_list, 'global', 1)
                     fig = self._apply_fonts(fig)
                     if suppress_legends:
                         fig.update_traces(visible='legendonly')
@@ -2469,12 +2404,23 @@ class UnichartNotebook:
             if fig:
                 if x in self.axis_limits:
                     fig.update_xaxes(range=self.axis_limits[x])
+                if by in ['sets', 'datasets']:
+                    fig = self._apply_decorations(fig, [], y_list, 'sets', 1)
+                else:
+                    _n = len(y_list)
+                    _nc = ncols if ncols is not None else (
+                        int(np.ceil(_n / nrows)) if nrows is not None
+                        else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
+                    )
+                    _nc = max(1, _nc)
+                    fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
+                                                  [(x, yi) for yi in y_list])
                 fig = self._apply_fonts(fig)
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
-                
-            return fig               
+
+            return fig
         # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
@@ -2518,23 +2464,36 @@ class UnichartNotebook:
             elif isinstance(x, list) and len(x) == 1:
                 limit = self.axis_limits.get(x[0])
 
+            x_list = x if isinstance(x, list) else [x]
+
             if by in ['sets', 'datasets']:
                 fig = unihistogram_by_dataset(
                     list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
-                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
+                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
                     histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                     darkmode=self.darkmode, x_lim=limit, return_axes=True
                 )
+                if fig:
+                    fig = self._apply_decorations(fig, x_list, [], 'sets', 1)
             else:
                 fig = unihistogram(
                     list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
-                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
+                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
                     histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
                     suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                     darkmode=self.darkmode, x_lim=limit, return_axes=True
                 )
-                
+                if fig:
+                    _n = len(x_list)
+                    _nc = ncols if ncols is not None else (
+                        int(np.ceil(_n / nrows)) if nrows is not None
+                        else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
+                    )
+                    _nc = max(1, _nc)
+                    fig = self._apply_decorations(fig, x_list, [], 'vars', _nc,
+                                                  [(xi, None) for xi in x_list])
+
             fig = self._apply_fonts(fig)
             if fig and suppress_legends:
                 fig.update_traces(visible='legendonly')
@@ -2604,14 +2563,25 @@ class UnichartNotebook:
                 )
                 
             if fig:
-                # Fixed duplicate apply_fonts and visibility calls from the original code
+                z_list = z if isinstance(z, list) else [z]
+                if by in ['sets', 'datasets']:
+                    fig = self._apply_decorations(fig, [x], [y], 'sets', 1)
+                else:
+                    _n = len(z_list)
+                    _nc = ncols if ncols is not None else (
+                        int(np.ceil(_n / nrows)) if nrows is not None
+                        else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
+                    )
+                    _nc = max(1, _nc)
+                    fig = self._apply_decorations(fig, [x], [y], 'vars', _nc,
+                                                  [(x, y) for _ in z_list])
                 fig = self._apply_fonts(fig)
                 if limit_x: fig.update_xaxes(range=limit_x)
                 if limit_y: fig.update_yaxes(range=limit_y)
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
                 self.last_fig = fig
-                
+
             return fig
     # ------------------------------------------------------------------
     # The table Command
@@ -3005,8 +2975,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def _clear_last_fig(self):
         """
-        Actively hollows out the massive JSON payload of the previous Plotly figure 
-        before dropping the reference. This prevents rapid RAM inflation (high-water marks) 
+        Actively hollows out the massive JSON payload of the previous Plotly figure
+        before dropping the reference. This prevents rapid RAM inflation (high-water marks)
         during tight plotting loops.
         """
         if self.last_fig is not None:
@@ -3015,6 +2985,91 @@ class UnichartNotebook:
             self.last_fig.layout = {}
             # Drop the pointer
             self.last_fig = None
+
+    def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None):
+        """
+        Apply stored lines and highlights to a figure.
+
+        mode='vars'  → per-subplot shapes, keyed by plot_items (list of (x, y) pairs).
+        anything else → global add_vline / add_hline / add_vrect / add_hrect.
+
+        x_vars / y_vars control which axes get decorated:
+          - bar/box: pass y_vars only (horizontal reference lines make sense).
+          - histogram: pass x_vars only (vertical reference lines make sense).
+          - scatter (plot): pass both.
+        """
+        x_list = x_vars if isinstance(x_vars, list) else ([x_vars] if x_vars else [])
+        y_list = y_vars if isinstance(y_vars, list) else ([y_vars] if y_vars else [])
+
+        for col_name, col_lines in self.lines.items():
+            if col_name in x_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if xi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for l in col_lines:
+                                fig.add_shape(
+                                    type='line', x0=l['level'], x1=l['level'], y0=0, y1=1,
+                                    xref=xref, yref=f'{yref} domain',
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                )
+                else:
+                    for l in col_lines:
+                        fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+
+            if col_name in y_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for l in col_lines:
+                                fig.add_shape(
+                                    type='line', x0=0, x1=1, y0=l['level'], y1=l['level'],
+                                    xref=f'{xref} domain', yref=yref,
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                )
+                else:
+                    for l in col_lines:
+                        fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+
+        for col_name, hls in self.highlights.items():
+            if col_name in x_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if xi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for h in hls:
+                                fig.add_shape(
+                                    type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
+                                    xref=xref, yref=f'{yref} domain',
+                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                )
+                else:
+                    for h in hls:
+                        fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
+                                      opacity=h['opacity'], layer='below', line_width=0)
+
+            if col_name in y_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for h in hls:
+                                fig.add_shape(
+                                    type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
+                                    xref=f'{xref} domain', yref=yref,
+                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                )
+                else:
+                    for h in hls:
+                        fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
+                                      opacity=h['opacity'], layer='below', line_width=0)
+
+        return fig
 
     def _refresh_widgets(self):
         """
