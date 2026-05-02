@@ -1863,6 +1863,114 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds.reg_order = order
 
+    def reg_info(self, uset_slice=None):
+        """
+        Return the parsed regression spec for the specified dataset(s).
+
+        Parameters
+        ----------
+        uset_slice : int, list, 'all', or None
+            Which dataset(s) to inspect. None / 'all' → all datasets.
+
+        Returns
+        -------
+        dict  {set_index: {'raw': raw_spec, 'kind': kind, 'param': param, 'label': label, 'formula': formula}}
+            'raw'     — the value stored in ds.reg_order
+            'kind'    — parsed regression family (e.g. 'poly', 'log', 'lowess') or None
+            'param'   — associated parameter (e.g. degree for poly, frac for lowess) or None
+            'label'   — human-readable description string, or None if no regression is set
+            'formula' — fitted equation string (e.g. 'y = 2.3x + 1.7'), or None if non-parametric
+        """
+        KIND_LABELS = {
+            'poly':   lambda p: "Linear (degree 1)" if p == 1 else f"Polynomial (degree {p})",
+            'log':    lambda p: "Logarithmic",
+            'exp':    lambda p: "Exponential",
+            'power':  lambda p: "Power law",
+            'lowess': lambda p: f"LOWESS (frac={p})",
+            'spline': lambda p: "Cubic spline",
+            'ma':     lambda p: f"Moving average (window={p})" if p else "Moving average",
+        }
+
+        def _fit_formula(kind, param, ds, x_col, y_col, label):
+            if kind not in ('poly', 'log', 'exp', 'power'):
+                return label
+            if x_col is None or y_col is None:
+                return None
+            df = ds.df
+            if x_col not in df.columns or y_col not in df.columns:
+                return None
+            try:
+                df_c = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
+                x = df_c[x_col].to_numpy(dtype=float)
+                y = df_c[y_col].to_numpy(dtype=float)
+                if len(x) < 2:
+                    return None
+
+                def _term(c, power, first):
+                    exp_str = {0: '', 1: 'x', 2: 'x²', 3: 'x³', 4: 'x⁴', 5: 'x⁵'}.get(power, f'x^{power}')
+                    if first:
+                        return f"{c:.4g}{exp_str}"
+                    return (f"+ {c:.4g}" if c >= 0 else f"- {abs(c):.4g}") + exp_str
+
+                if kind == 'poly':
+                    order = int(param) if param else 1
+                    if len(x) < order + 1:
+                        return None
+                    coeffs = np.polyfit(x, y, order)
+                    parts = [_term(c, order - i, i == 0) for i, c in enumerate(coeffs)]
+                    return "y = " + " ".join(parts)
+
+                if kind == 'log':
+                    mask = x > 0
+                    if mask.sum() < 2:
+                        return None
+                    a, b = np.polyfit(np.log(x[mask]), y[mask], 1)
+                    b_part = f"+ {b:.4g}" if b >= 0 else f"- {abs(b):.4g}"
+                    return f"y = {a:.4g}·ln(x) {b_part}"
+
+                if kind == 'exp':
+                    mask = y > 0
+                    if mask.sum() < 2:
+                        return None
+                    b, log_a = np.polyfit(x[mask], np.log(y[mask]), 1)
+                    return f"y = {np.exp(log_a):.4g}·e^({b:.4g}x)"
+
+                if kind == 'power':
+                    mask = (x > 0) & (y > 0)
+                    if mask.sum() < 2:
+                        return None
+                    b, log_a = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
+                    return f"y = {np.exp(log_a):.4g}·x^{b:.4g}"
+
+            except Exception:
+                return None
+
+        lx, ly = self.last_x, self.last_y
+        x_col = lx[0] if isinstance(lx, list) else lx
+        y_col = ly[0] if isinstance(ly, list) else ly
+
+        result = {}
+        for ds in (self.uset if uset_slice is None or uset_slice == 'all'
+                   else self._get_uset_slice(uset_slice)):
+            raw = ds.reg_order
+            kind, param = _parse_reg_spec(raw)
+            label = KIND_LABELS.get(kind, lambda p: str(kind))(param) if kind is not None else None
+            formula = _fit_formula(kind, param, ds, x_col, y_col, label)
+            result[ds.index] = {'raw': raw, 'kind': kind, 'param': param, 'label': label, 'formula': formula}
+
+        # Pretty-print summary
+        any_reg = any(v['kind'] is not None for v in result.values())
+        for idx, info in result.items():
+            ds = self.uset[idx]
+            reg_str = info['label'] or "None"
+            formula_str = f"  →  {info['formula']}" if info['formula'] else ""
+            print(f"Set {idx} ({ds.title}): {reg_str}{formula_str}")
+
+        if not any_reg:
+            print("No regression functions are currently set.")
+
+        return result
+
     def set_display_parms(self, uset_slice, parms):
         """
         Update the display parameters (columns shown on hover) for the specified dataset(s).
