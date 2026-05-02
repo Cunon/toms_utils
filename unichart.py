@@ -1874,12 +1874,13 @@ class UnichartNotebook:
 
         Returns
         -------
-        dict  {set_index: {'raw': raw_spec, 'kind': kind, 'param': param, 'label': label, 'formula': formula}}
+        dict  {set_index: {'raw': raw_spec, 'kind': kind, 'param': param, 'label': label, 'formula': formula, 'stats': stats}}
             'raw'     — the value stored in ds.reg_order
             'kind'    — parsed regression family (e.g. 'poly', 'log', 'lowess') or None
             'param'   — associated parameter (e.g. degree for poly, frac for lowess) or None
             'label'   — human-readable description string, or None if no regression is set
-            'formula' — fitted equation string (e.g. 'y = 2.3x + 1.7'), or None if non-parametric
+            'formula' — fitted equation string (e.g. 'y = 2.3x + 1.7'), or label string if non-parametric
+            'stats'   — dict {'n', 'r2', 'rmse', 'mae'}, or None if unavailable
         """
         KIND_LABELS = {
             'poly':   lambda p: "Linear (degree 1)" if p == 1 else f"Polynomial (degree {p})",
@@ -1891,20 +1892,21 @@ class UnichartNotebook:
             'ma':     lambda p: f"Moving average (window={p})" if p else "Moving average",
         }
 
-        def _fit_formula(kind, param, ds, x_col, y_col, label):
-            if kind not in ('poly', 'log', 'exp', 'power'):
-                return label
-            if x_col is None or y_col is None:
-                return None
+        def _fit_regression(kind, param, ds, x_col, y_col, label):
+            formula = label if kind not in ('poly', 'log', 'exp', 'power') else None
+            if kind is None or x_col is None or y_col is None:
+                return formula, None
             df = ds.df
             if x_col not in df.columns or y_col not in df.columns:
-                return None
+                return formula, None
             try:
                 df_c = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
                 x = df_c[x_col].to_numpy(dtype=float)
                 y = df_c[y_col].to_numpy(dtype=float)
                 if len(x) < 2:
-                    return None
+                    return formula, None
+
+                y_pred = None
 
                 def _term(c, power, first):
                     exp_str = {0: '', 1: 'x', 2: 'x²', 3: 'x³', 4: 'x⁴', 5: 'x⁵'}.get(power, f'x^{power}')
@@ -1915,35 +1917,78 @@ class UnichartNotebook:
                 if kind == 'poly':
                     order = int(param) if param else 1
                     if len(x) < order + 1:
-                        return None
-                    coeffs = np.polyfit(x, y, order)
-                    parts = [_term(c, order - i, i == 0) for i, c in enumerate(coeffs)]
-                    return "y = " + " ".join(parts)
+                        return formula, None
+                    p = np.poly1d(np.polyfit(x, y, order))
+                    y_pred = p(x)
+                    parts = [_term(c, order - i, i == 0) for i, c in enumerate(p.coeffs)]
+                    formula = "y = " + " ".join(parts)
 
-                if kind == 'log':
+                elif kind == 'log':
                     mask = x > 0
                     if mask.sum() < 2:
-                        return None
+                        return formula, None
                     a, b = np.polyfit(np.log(x[mask]), y[mask], 1)
+                    y_pred = np.where(x > 0, a * np.log(np.where(x > 0, x, 1)) + b, np.nan)
                     b_part = f"+ {b:.4g}" if b >= 0 else f"- {abs(b):.4g}"
-                    return f"y = {a:.4g}·ln(x) {b_part}"
+                    formula = f"y = {a:.4g}·ln(x) {b_part}"
 
-                if kind == 'exp':
+                elif kind == 'exp':
                     mask = y > 0
                     if mask.sum() < 2:
-                        return None
+                        return formula, None
                     b, log_a = np.polyfit(x[mask], np.log(y[mask]), 1)
-                    return f"y = {np.exp(log_a):.4g}·e^({b:.4g}x)"
+                    A = np.exp(log_a)
+                    y_pred = A * np.exp(b * x)
+                    formula = f"y = {A:.4g}·e^({b:.4g}x)"
 
-                if kind == 'power':
+                elif kind == 'power':
                     mask = (x > 0) & (y > 0)
                     if mask.sum() < 2:
-                        return None
+                        return formula, None
                     b, log_a = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
-                    return f"y = {np.exp(log_a):.4g}·x^{b:.4g}"
+                    A = np.exp(log_a)
+                    y_pred = np.where(x > 0, A * np.power(np.where(x > 0, x, 1), b), np.nan)
+                    formula = f"y = {A:.4g}·x^{b:.4g}"
+
+                elif kind == 'lowess':
+                    try:
+                        from statsmodels.nonparametric.smoothers_lowess import lowess
+                        frac = float(param) if param is not None else 0.3
+                        y_pred = lowess(y, x, frac=frac, return_sorted=True)[:, 1]
+                    except ImportError:
+                        return formula, None
+
+                elif kind == 'spline':
+                    from scipy.interpolate import UnivariateSpline
+                    k = max(1, min(5, int(param) if param else 3))
+                    ux, uidx = np.unique(x, return_index=True)
+                    if len(ux) < k + 1:
+                        return formula, None
+                    y_pred = UnivariateSpline(ux, y[uidx], k=k)(x)
+
+                elif kind == 'ma':
+                    window = int(param) if param else max(3, len(x) // 20)
+                    window = max(2, min(window, len(x)))
+                    y_pred = pd.Series(y).rolling(window=window, center=True, min_periods=1).mean().to_numpy()
+
+                if y_pred is not None:
+                    valid = ~(np.isnan(y) | np.isnan(y_pred))
+                    y_v, yp_v = y[valid], y_pred[valid]
+                    if len(y_v) >= 2:
+                        ss_res = np.sum((y_v - yp_v) ** 2)
+                        ss_tot = np.sum((y_v - np.mean(y_v)) ** 2)
+                        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+                        return formula, {
+                            'n':    int(valid.sum()),
+                            'r2':   r2,
+                            'rmse': float(np.sqrt(np.mean((y_v - yp_v) ** 2))),
+                            'mae':  float(np.mean(np.abs(y_v - yp_v))),
+                        }
 
             except Exception:
-                return None
+                pass
+
+            return formula, None
 
         lx, ly = self.last_x, self.last_y
         x_col = lx[0] if isinstance(lx, list) else lx
@@ -1955,8 +2000,8 @@ class UnichartNotebook:
             raw = ds.reg_order
             kind, param = _parse_reg_spec(raw)
             label = KIND_LABELS.get(kind, lambda p: str(kind))(param) if kind is not None else None
-            formula = _fit_formula(kind, param, ds, x_col, y_col, label)
-            result[ds.index] = {'raw': raw, 'kind': kind, 'param': param, 'label': label, 'formula': formula}
+            formula, stats = _fit_regression(kind, param, ds, x_col, y_col, label)
+            result[ds.index] = {'raw': raw, 'kind': kind, 'param': param, 'label': label, 'formula': formula, 'stats': stats}
 
         # Pretty-print summary
         any_reg = any(v['kind'] is not None for v in result.values())
@@ -1965,6 +2010,10 @@ class UnichartNotebook:
             reg_str = info['label'] or "None"
             formula_str = f"  →  {info['formula']}" if info['formula'] else ""
             print(f"Set {idx} ({ds.title}): {reg_str}{formula_str}")
+            if info['stats']:
+                s = info['stats']
+                r2_str = f"R²={s['r2']:.4f}" if s['r2'] is not None else "R²=N/A"
+                print(f"   {r2_str}   RMSE={s['rmse']:.4g}   MAE={s['mae']:.4g}   n={s['n']}")
 
         if not any_reg:
             print("No regression functions are currently set.")
