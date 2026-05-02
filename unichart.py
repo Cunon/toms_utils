@@ -650,7 +650,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             ht += "<extra></extra>"
 
             mode_parts = []
-            if not cur_linestyle: mode_parts.append('markers')
+            if not cur_linestyle or cur_reg_order: mode_parts.append('markers')
             else: mode_parts.append('lines')
             if cur_marker: mode_parts.append('markers')
             mode = "+".join(mode_parts)
@@ -693,7 +693,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                         x=rx, y=ry, mode='lines',
                         name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
                         legendgroup=f"group_{cur_idx}",
-                        line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
+                        line=dict(color=cur_color, width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle)),
                         opacity=0.7, hoverinfo='skip', showlegend=False
                     ), row=row, col=col)
 
