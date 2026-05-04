@@ -12,6 +12,8 @@ from IPython.display import display, clear_output
 import re
 import inspect
 from scipy.interpolate import griddata
+import functools
+import gc
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -29,10 +31,35 @@ LINESTYLE_MAP_MPL_TO_PLOTLY = {
     'None': None, ' ': None, '': None
 }
 
+FONT_SIZE_MAP = {
+    'xs':     8,
+    'xsmall': 8,
+    'sm':     10,
+    'small':  10,
+    'md':     12,
+    'medium': 12,
+    'base':   12,
+    'lg':     14,
+    'large':  14,
+    'xl':     18,
+    'xlarge': 18,
+    'xxl':    24,
+    '2xl':    24,
+    'xxxl':   28,
+    '3xl':    28,
+    'huge':   32,
+}
+
 def get_plotly_marker(mpl_marker):
+    # Pass through if already a Plotly-native name
+    if mpl_marker in MARKER_MAP_MPL_TO_PLOTLY.values():
+        return mpl_marker
     return MARKER_MAP_MPL_TO_PLOTLY.get(mpl_marker, 'circle')
 
 def get_plotly_linestyle(mpl_style):
+    # Pass through if already a Plotly-native name
+    if mpl_style in LINESTYLE_MAP_MPL_TO_PLOTLY.values():
+        return mpl_style
     return LINESTYLE_MAP_MPL_TO_PLOTLY.get(mpl_style, 'solid')
 
 def validate_color(value):
@@ -42,8 +69,6 @@ def validate_color(value):
     """
     if not isinstance(value, str):
         return False
-    # Basic check for Hex or standard names. 
-    # In a full util, we might check against plotly.colors.named_colorscales()
     return True
 
 def validate_marker(value):
@@ -61,25 +86,105 @@ def _generate_contour_grid(x_data, y_data, z_data, res=100, method='linear'):
     Interpolates scattered x, y, z data into a uniform 2D grid for contour plotting.
     Leaves data outside the convex hull as NaN.
     """
-    # Filter out any rows where x, y, or z are NaN
     valid = ~(np.isnan(x_data) | np.isnan(y_data) | np.isnan(z_data))
     x_val = x_data[valid]
     y_val = y_data[valid]
     z_val = z_data[valid]
 
-    # Failsafe for insufficient data
     if len(x_val) < 4:
         return x_val.values, y_val.values, z_val.values
 
-    # Create uniform grid axes
     xi = np.linspace(x_val.min(), x_val.max(), res)
     yi = np.linspace(y_val.min(), y_val.max(), res)
     xi_grid, yi_grid = np.meshgrid(xi, yi)
 
-    # Interpolate Z values onto the grid
     zi_grid = griddata((x_val, y_val), z_val, (xi_grid, yi_grid), method=method)
 
     return xi, yi, zi_grid
+
+# -----------------------------------------------------------------------------
+# Private Helpers
+# -----------------------------------------------------------------------------
+
+def _calc_grid(n, nrows, ncols):
+    if nrows is None and ncols is None:
+        ncols = min(3, max(1, int(np.ceil(np.sqrt(n)))))
+        nrows = int(np.ceil(n / ncols))
+    elif nrows is None:
+        nrows = int(np.ceil(n / ncols))
+    elif ncols is None:
+        ncols = int(np.ceil(n / nrows))
+    return nrows, ncols
+
+def _base_layout(darkmode, suptitle, figsize, **extra):
+    title_defaults = {'x': 0.5, 'yref': 'container', 'y': 0.99, 'yanchor': 'top'}
+    incoming_title = extra.pop('title', {})
+    if isinstance(incoming_title, str):
+        incoming_title = {'text': incoming_title}
+    if 'text' not in incoming_title:
+        incoming_title['text'] = suptitle
+    merged_title = {**title_defaults, **incoming_title}
+
+    default_margin = {'t': 100}
+    incoming_margin = extra.pop('margin', {})
+    merged_margin = {**default_margin, **incoming_margin}
+
+    args = {
+        'template': "plotly_dark" if darkmode else "plotly_white",
+        'title': merged_title,
+        'margin': merged_margin,
+        **extra
+    }
+    if figsize:
+        args['width'] = figsize[0] * 100
+        args['height'] = figsize[1] * 100
+    return args
+
+def _build_xbins(bin_size, bin_start, bin_end):
+    d = {}
+    if bin_size is not None: d['size'] = bin_size
+    if bin_start is not None: d['start'] = bin_start
+    if bin_end is not None: d['end'] = bin_end
+    return d or None
+
+def _show_or_return(fig, return_axes):
+    if return_axes:
+        return fig
+    fig.show()
+    return fig
+
+def _subplot_refs(row, col, ncols):
+    """Return the (xref, yref) axis name strings for a subplot at (row, col) in an ncols grid."""
+    idx = (row - 1) * ncols + col
+    xref = 'x' if idx == 1 else f'x{idx}'
+    yref = 'y' if idx == 1 else f'y{idx}'
+    return xref, yref
+
+# -----------------------------------------------------------------------------
+# Variable Format Resolver (used by multi-y plot)
+# -----------------------------------------------------------------------------
+_VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha')
+
+def _resolve_var_format(dataset, variable, variable_formats=None):
+    """
+    Per-attribute precedence: variable_formats wins, else dataset attr.
+
+    Used by the multi-y-axis plot. Returns a flat dict containing the
+    final color/marker/linestyle/markersize/linewidth/alpha that should
+    be applied for a given (dataset, variable) pair.
+    """
+    variable_formats = variable_formats or {}
+    var_fmt = variable_formats.get(variable, {})
+    return {
+        'color':      var_fmt.get('color',      dataset.color),
+        'marker':     var_fmt.get('marker',     dataset.marker),
+        'linestyle':  var_fmt.get('linestyle',  dataset.linestyle),
+        'markersize': var_fmt.get('markersize', dataset.markersize),
+        'linewidth':  var_fmt.get('linewidth',  dataset.linewidth),
+        'alpha':      var_fmt.get('alpha',      dataset.alpha),
+        'edge_color': getattr(dataset, 'edge_color', 'black'),
+        'edgewidth':  getattr(dataset, 'edgewidth', 1),
+    }
 
 # -----------------------------------------------------------------------------
 # Dataset Class
@@ -97,7 +202,6 @@ class Dataset:
         self.query = None
         self._select = True
         
-        # Title logic
         if title:
             self.title = title
         elif "TITLE" in df.columns:
@@ -108,17 +212,16 @@ class Dataset:
         self.index = index
         self.title_format = f"{self.title} {index}"
         
-        # Default colors (cycling through Plotly default palette)
         default_colors = px.colors.qualitative.Plotly
         self._color = default_colors[index % len(default_colors)]
         
         self._marker = marker_map(index)
         self._edge_color = "black"
         self._linestyle = None
-        self.markersize = 10  # Adjusted default for Plotly
+        self.markersize = 10
         self.alpha = 1
         self.hue = ""
-        self.hue_palette = "Jet" # Default Plotly colorscale
+        self.hue_palette = "Jet"
         self.hue_order = None
         self.reg_order = None
         self.style = None
@@ -319,22 +422,126 @@ def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', 
     y_interp = f(x_in)
     return y_interp
 
-def _calculate_regression(df, x_col, y_col, order):
-    """Internal helper to calculate polynomial regression lines."""
+def _parse_reg_spec(spec):
+    """Normalize reg_order spec into (kind, param)."""
+    if not spec:
+        return None, None
+    if isinstance(spec, bool):
+        return None, None
+    if isinstance(spec, numbers.Number):
+        return ('poly', int(spec)) if spec > 0 else (None, None)
+
+    aliases = {
+        'linear': ('poly', 1), 'lin': ('poly', 1),
+        'quadratic': ('poly', 2), 'cubic': ('poly', 3),
+        'poly': ('poly', None),
+        'log': ('log', None), 'logarithmic': ('log', None),
+        'exp': ('exp', None), 'exponential': ('exp', None),
+        'power': ('power', None), 'pow': ('power', None),
+        'lowess': ('lowess', 0.3), 'loess': ('lowess', 0.3),
+        'spline': ('spline', 3), 'cubic_spline': ('spline', 3),
+        'ma': ('ma', None), 'moving_average': ('ma', None), 'rolling': ('ma', None),
+    }
+
+    if isinstance(spec, str):
+        s = spec.lower().strip()
+        if s in aliases: return aliases[s]
+        if s.startswith('poly'):
+            try: return 'poly', int(s[4:])
+            except ValueError: pass
+        raise ValueError(f"Unknown regression type: {spec!r}")
+
+    if isinstance(spec, (tuple, list)) and len(spec) == 2:
+        kind, param = spec
+        kind = str(kind).lower().strip()
+        if kind in aliases:
+            return aliases[kind][0], param
+        raise ValueError(f"Unknown regression kind: {kind!r}")
+
+    raise ValueError(f"Invalid reg_order spec: {spec!r}")
+
+
+def _calculate_regression(df, x_col, y_col, spec):
+    """
+    Compute a regression curve. Returns (x_array, y_array, label).
+    Returns (None, None, None) when spec is falsy or fit cannot be computed.
+    """
+    kind, param = _parse_reg_spec(spec)
+    if kind is None:
+        return None, None, None
+
     df_clean = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
-    x = df_clean[x_col]
-    y = df_clean[y_col]
-    
-    if len(x) < order + 1:
-        return x, y * np.nan
-        
-    z = np.polyfit(x, y, order)
-    p = np.poly1d(z)
-    
-    # Create smooth line
-    x_lin = np.linspace(x.min(), x.max(), 100)
-    y_lin = p(x_lin)
-    return x_lin, y_lin
+    x = df_clean[x_col].to_numpy(dtype=float)
+    y = df_clean[y_col].to_numpy(dtype=float)
+    if len(x) < 2:
+        return None, None, None
+
+    x_lin = np.linspace(x.min(), x.max(), 200)
+
+    try:
+        if kind == 'poly':
+            order = int(param) if param else 1
+            if len(x) < order + 1:
+                return None, None, None
+            p = np.poly1d(np.polyfit(x, y, order))
+            label = 'Linear' if order == 1 else f'LS{order}'
+            return x_lin, p(x_lin), label
+
+        if kind == 'log':
+            mask = x > 0
+            if mask.sum() < 2: return None, None, None
+            a, b = np.polyfit(np.log(x[mask]), y[mask], 1)
+            y_lin = np.full_like(x_lin, np.nan)
+            pos = x_lin > 0
+            y_lin[pos] = a * np.log(x_lin[pos]) + b
+            return x_lin, y_lin, 'Log'
+
+        if kind == 'exp':
+            mask = y > 0
+            if mask.sum() < 2: return None, None, None
+            b, log_a = np.polyfit(x[mask], np.log(y[mask]), 1)
+            return x_lin, np.exp(log_a) * np.exp(b * x_lin), 'Exp'
+
+        if kind == 'power':
+            mask = (x > 0) & (y > 0)
+            if mask.sum() < 2: return None, None, None
+            b, log_a = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
+            y_lin = np.full_like(x_lin, np.nan)
+            pos = x_lin > 0
+            y_lin[pos] = np.exp(log_a) * np.power(x_lin[pos], b)
+            return x_lin, y_lin, 'Power'
+
+        if kind == 'lowess':
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess
+            except ImportError:
+                warnings.warn("LOWESS requires statsmodels. Install with `pip install statsmodels`.")
+                return None, None, None
+            frac = float(param) if param is not None else 0.3
+            res = lowess(y, x, frac=frac, return_sorted=True)
+            return res[:, 0], res[:, 1], f'LOWESS({frac:.2f})'
+
+        if kind == 'spline':
+            from scipy.interpolate import UnivariateSpline
+            k = max(1, min(5, int(param) if param else 3))
+            ux, idx = np.unique(x, return_index=True)
+            uy = y[idx]
+            if len(ux) < k + 1:
+                return None, None, None
+            spl = UnivariateSpline(ux, uy, k=k)
+            return x_lin, spl(x_lin), f'Spline{k}'
+
+        if kind == 'ma':
+            window = int(param) if param else max(3, len(x) // 20)
+            window = max(2, min(window, len(x)))
+            ma = pd.Series(y).rolling(window=window, center=True, min_periods=1).mean().to_numpy()
+            return x, ma, f'MA({window})'
+
+    except Exception as e:
+        warnings.warn(f"Regression '{kind}' failed: {e}")
+        return None, None, None
+
+    return None, None, None
 
 # -----------------------------------------------------------------------------
 # Main Plotting Functions
@@ -344,66 +551,60 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             hue_order=None, line=False, suppress_msg=False, return_axes=False, axes=None,
             suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
             darkmode=False, interactive=True, display_parms=None, grid=True,
-            legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None):
-    """
-    Create a unified plot for a list of datasets using Plotly.
-    Updated: Subplot titles default to None; Main title is centered.
-    Includes legendgroup fix to toggle traces across subplots.
-    """
-    from plotly.subplots import make_subplots
-    
+            legend='above', legend_ncols=1, figsize=(12, 8), ncols=None, nrows=None, x_lim=None, y_lim=None,
+            axis_limits=None):
+
+    axis_limits = axis_limits or {}
+    x_list = x if isinstance(x, list) else [x]
     y_list = y if isinstance(y, list) else [y]
-    n_y = len(y_list)
-    
-    if n_y == 0:
-        raise ValueError("y must contain at least one column.")
 
-    # Determine subplot layout
-    if nrows is None and ncols is None:
-        ncols_auto = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
-        nrows_auto = int(np.ceil(n_y / ncols_auto))
-        nrows, ncols = nrows_auto, ncols_auto
-    elif nrows is None:
-        nrows = int(np.ceil(n_y / ncols))
-    elif ncols is None:
-        ncols = int(np.ceil(n_y / nrows))
+    if len(x_list) == len(y_list):
+        pairs = list(zip(x_list, y_list))
+    elif len(x_list) == 1:
+        pairs = [(x_list[0], yi) for yi in y_list]
+    elif len(y_list) == 1:
+        pairs = [(xi, y_list[0]) for xi in x_list]
+    else:
+        raise ValueError(
+            f"x and y must be the same length, or one must be a single value. "
+            f"Got len(x)={len(x_list)}, len(y)={len(y_list)}."
+        )
 
-    # Initialize subplots
+    n_plots = len(pairs)
+    if n_plots == 0: raise ValueError("At least one x/y pair is required.")
+
+    nrows, ncols = _calc_grid(n_plots, nrows, ncols)
+
+    numeric_hue_info = {}
+    for _ds in list_of_datasets:
+        if not _ds.select: continue
+        _fmt = _ds.get_format_dict()
+        _cur_hue = _fmt.get('hue') or hue
+        if not _cur_hue or _cur_hue in numeric_hue_info: continue
+        _df = _ds.df
+        if _cur_hue in _df.columns and pd.api.types.is_numeric_dtype(_df[_cur_hue]):
+            _idx = len(numeric_hue_info) + 1
+            numeric_hue_info[_cur_hue] = {
+                'ca_name': 'coloraxis' if _idx == 1 else f'coloraxis{_idx}',
+                'palette': _fmt.get('hue_palette', 'Jet'),
+                'lim': axis_limits.get(_cur_hue),
+            }
+
+    right_margin = max(80, len(numeric_hue_info) * 90)
+
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles, shared_xaxes=False)
+    fig.update_layout(**_base_layout(
+        darkmode, None, figsize,
+        title={'text': suptitle or (f"{x} vs {[str(yi) for yi in y_list]}" if len(x_list) == 1 else f"{x_list} vs {y_list}"), 'x': 0.5, 'xanchor': 'center'},
+        showlegend=(legend != 'off'),
+        margin=dict(r=right_margin),
+    ))
 
-    # --- LAYOUT SETUP ---
-    final_title = suptitle if suptitle else f"{x} vs {[str(yi) for yi in y_list]}"
-    
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {
-            'text': final_title,
-            'x': 0.5,
-            'xanchor': 'center'
-        },
-        # 'xaxis_title': xlabel if xlabel else x, # REMOVED: Applied in loop below instead
-        'showlegend': True if legend != 'off' else False
-    }
-
-    if figsize:
-        layout_args['width'] = figsize[0] * 100
-        layout_args['height'] = figsize[1] * 100
-
-    fig.update_layout(**layout_args)
-
-    # --- PLOT LOOP ---
     for dataset in list_of_datasets:
-        if not dataset.select:
-            continue
-        df = dataset.df.copy()
+        if not dataset.select: continue
         
-        df = df.loc[:, ~df.columns.duplicated()]
+        base_df = dataset.df
         
-        if dataset.order == 'index': df = df.sort_index()
-        elif dataset.order: df = df.sort_values(by=dataset.order)
-        else: df = df.sort_index()
-
-        # Resolve formatting
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
         cur_hue = fmt.get('hue') or hue
@@ -417,63 +618,60 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
-        for idx_y, yi in enumerate(y_list):
-            row = idx_y // ncols + 1
-            col = idx_y % ncols + 1
+        for idx_p, (x_name, yi) in enumerate(pairs):
+            row = idx_p // ncols + 1
+            col = idx_p % ncols + 1
 
-            if yi not in df.columns:
-                print(f"Skipping {yi} for set {cur_idx}: column not found.")
-                continue
+            if yi not in base_df.columns: continue
 
-            # X-Column Resolution
-            if x not in df.columns:
-                cols_upper = {c.upper(): c for c in df.columns}
-                x_key = cols_upper.get(str(x).upper())
-                if not x_key:
-                    print(f"Skipping plot: x='{x}' not found.")
-                    continue
+            if x_name not in base_df.columns:
+                cols_upper = {c.upper(): c for c in base_df.columns}
+                x_key = cols_upper.get(str(x_name).upper())
+                if not x_key: continue
                 x_col = x_key
             else:
-                x_col = x
+                x_col = x_name
 
-            # Custom Data & Hover
-            hover_cols = [p for p in hover_parms if p in df.columns]
+            req_cols = [x_col, yi]
+            if cur_hue and cur_hue in base_df.columns: req_cols.append(cur_hue)
+            valid_hover = [p for p in hover_parms if p in base_df.columns]
+            req_cols.extend(valid_hover)
+            if dataset.order and dataset.order != 'index' and dataset.order in base_df.columns:
+                req_cols.append(dataset.order)
+            
+            req_cols = list(dict.fromkeys(req_cols))
+            
+            valid_cols_mask = ~base_df.columns.duplicated()
+            df = base_df.loc[:, valid_cols_mask][req_cols]
+
+            if dataset.order == 'index': df = df.sort_index()
+            elif dataset.order: df = df.sort_values(by=dataset.order)
+            else: df = df.sort_index()
+
             custom_data_cols = []
             seen_cols = set()
-            
-            for c in [x_col, yi]:
-                if c not in seen_cols:
-                    custom_data_cols.append(c)
-                    seen_cols.add(c)
-            
-            for c in hover_cols:
+            for c in [x_col, yi] + valid_hover:
                 if c not in seen_cols:
                     custom_data_cols.append(c)
                     seen_cols.add(c)
             
             custom_data = df[custom_data_cols]
-            
-            def get_cd_idx(col_name):
-                return custom_data_cols.index(col_name)
+            def get_cd_idx(col_name): return custom_data_cols.index(col_name)
 
             ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
-            for parm in hover_cols:
-                # Check if the column is numeric to apply 5 sig fig formatting
-                if pd.api.types.is_numeric_dtype(df[parm]):
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
-                else:
-                    ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
+            for parm in valid_hover:
+                if pd.api.types.is_numeric_dtype(df[parm]): ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
+                else: ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
             ht += "<extra></extra>"
 
             mode_parts = []
-            if not cur_linestyle: mode_parts.append('markers')
+            if not cur_linestyle or cur_reg_order: mode_parts.append('markers')
             else: mode_parts.append('lines')
             if cur_marker: mode_parts.append('markers')
             mode = "+".join(mode_parts)
 
             marker_dict = dict(
-                size=cur_markersize,
-                symbol=get_plotly_marker(cur_marker),
+                size=cur_markersize, symbol=get_plotly_marker(cur_marker),
                 line=dict(width=fmt.get('edgewidth', 1), color=fmt.get('edge_color', 'black')),
                 opacity=cur_alpha
             )
@@ -482,13 +680,14 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             if cur_hue and cur_hue in df.columns:
                 hue_data = df[cur_hue]
                 if pd.api.types.is_numeric_dtype(hue_data):
+                    info = numeric_hue_info.get(cur_hue, {})
                     marker_dict['color'] = hue_data
-                    marker_dict['colorbar'] = dict(title=cur_hue)
+                    marker_dict['coloraxis'] = info.get('ca_name', 'coloraxis')
                 else:
                     hue_series = hue_data.astype('category')
                     marker_dict['color'] = hue_series.cat.codes
                     marker_dict['colorscale'] = fmt.get('hue_palette', 'Jet')
-                    marker_dict['showscale'] = False 
+                    marker_dict['showscale'] = False
             else:
                 marker_dict['color'] = cur_color
                 line_dict['color'] = cur_color
@@ -499,249 +698,195 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 legendgroup=f"group_{cur_idx}",
                 marker=marker_dict, line=line_dict,
                 customdata=custom_data, hovertemplate=ht,
-                showlegend=(idx_y == 0)
+                showlegend=(idx_p == 0)
             ), row=row, col=col)
 
-            if isinstance(cur_reg_order, numbers.Number) and cur_reg_order > 0:
-                rx, ry = _calculate_regression(df, x_col, yi, cur_reg_order)
-                fig.add_trace(go.Scatter(
-                    x=rx, y=ry, mode='lines',
-                    name=f"{cur_idx}: {cur_title} Fit LS {cur_reg_order}",
-                    legendgroup=f"group_{cur_idx}",
-                    line=dict(color=cur_color, width=cur_linewidth, dash='dash'),
-                    opacity=0.7, hoverinfo='skip', showlegend=False
-                ), row=row, col=col)
+            if cur_reg_order:
+                rx, ry, fit_label = _calculate_regression(df, x_col, yi, cur_reg_order)
+                if rx is not None:
+                    fig.add_trace(go.Scatter(
+                        x=rx, y=ry, mode='lines',
+                        name=f"{cur_idx}: {cur_title} Fit ({fit_label})",
+                        legendgroup=f"group_{cur_idx}",
+                        line=dict(color=cur_color, width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle)),
+                        opacity=0.7, hoverinfo='skip', showlegend=False
+                    ), row=row, col=col)
 
-    for idx_y, yi in enumerate(y_list):
-        row = idx_y // ncols + 1
-        col = idx_y % ncols + 1
-        
+    coloraxis_updates = {}
+    for hue_col, info in numeric_hue_info.items():
+        idx = list(numeric_hue_info.keys()).index(hue_col)
+        ca_def = dict(
+            colorscale=info['palette'],
+            colorbar=dict(title=hue_col, x=1.02 + idx * 0.12, thickness=15),
+        )
+        if info['lim']:
+            ca_def['cmin'] = info['lim'][0]
+            ca_def['cmax'] = info['lim'][1]
+        coloraxis_updates[info['ca_name']] = ca_def
+    if coloraxis_updates:
+        fig.update_layout(**coloraxis_updates)
+
+    for idx_p, (x_name, yi) in enumerate(pairs):
+        row = idx_p // ncols + 1
+        col = idx_p % ncols + 1
+
         axis_title = ylabel if ylabel else yi
-        x_axis_title = xlabel if xlabel else x
-        
+        x_axis_title = xlabel if xlabel else x_name
+
         fig.update_yaxes(title_text=axis_title, title_standoff=15, row=row, col=col)
         fig.update_xaxes(title_text=x_axis_title, title_standoff=15, row=row, col=col)
 
-    # Global Axis Limits
-    for idx_y, yi in enumerate(y_list):
-        row = idx_y // ncols + 1
-        col = idx_y % ncols + 1
+    for idx_p, (x_name, yi) in enumerate(pairs):
+        row = idx_p // ncols + 1
+        col = idx_p % ncols + 1
         if y_lim: fig.update_yaxes(range=y_lim, row=row, col=col)
-    
-    if x_lim: fig.update_xaxes(range=x_lim)
+        if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
     if not grid:
         fig.update_xaxes(showgrid=False)
         fig.update_yaxes(showgrid=False)
     if legend == 'above':
         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
 
-    if return_axes: return fig
-    fig.show()
-    return fig
-def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None, 
-                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
-                        darkmode=True, x_lim=None, y_lim=None, axis_limits=None, return_axes=False):
-    """
-    Revised plotting engine for Multi-Y Axis.
-    - Fixes 'ValueError: position' by shrinking X-axis domain to make room for extra axes.
-    - Supports proper line widths and dash styles.
-    """
+    return _show_or_return(fig, return_axes)
+
+def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
+                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
+                        darkmode=True, x_lim=None, y_lim=None,
+                        axis_limits=None, return_axes=False):
+
     active_datasets = [d for d in list_of_datasets if d.select]
     if not active_datasets:
-        print("No datasets selected.")
         return None
 
     y_list = y if isinstance(y, list) else [y]
     axis_limits = axis_limits or {}
-    
-    # --- Grid Setup ---
     n_sets = len(active_datasets)
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
-        nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None:
-        nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None:
-        ncols = int(np.ceil(n_sets / nrows))
-        
-    sp_titles = [ds.title_format for ds in active_datasets]
-    
-    # We DO NOT set a huge right margin here anymore; we handle spacing via domain shrinking.
-    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=sp_titles, shared_xaxes=False)
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle if suptitle else f"Dataset Comparison", 'x': 0.5},
-        'showlegend': True,
-        # Standard margin is usually fine now, or slight increase
-        'margin': dict(r=50) 
-    }
-    if figsize:
-        layout_args['width'] = figsize[0] * 100
-        layout_args['height'] = figsize[1] * 100
-        
-    fig.update_layout(**layout_args)
+    use_secondary = len(y_list) >= 2
+    if len(y_list) > 2:
+        warnings.warn(
+            f"{len(y_list)} y-variables requested; only the first 2 get dedicated "
+            "axes per subplot. Variables 3+ will share the secondary axis."
+        )
+
+    specs = [[{'secondary_y': use_secondary} for _ in range(ncols)] for _ in range(nrows)]
+    sp_titles = [ds.title_format for ds in active_datasets]
+    sp_titles += [""] * (nrows * ncols - len(sp_titles))
+
+    fig = make_subplots(
+        rows=nrows, cols=ncols, specs=specs,
+        subplot_titles=sp_titles,
+        horizontal_spacing=0.12 if use_secondary else 0.08,
+        vertical_spacing=0.15,
+    )
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Dataset Comparison", figsize,
+        showlegend=True, margin=dict(r=60),
+    ))
+
     color_cycle = px.colors.qualitative.Plotly
-    
-    # Counter for generating new axis IDs (starts after the grid axes)
-    next_free_axis_idx = (nrows * ncols) + 1
+    primary_y = y_list[0]
+    secondary_ys = y_list[1:]
 
     for idx_ds, dataset in enumerate(active_datasets):
         row = (idx_ds // ncols) + 1
         col = (idx_ds % ncols) + 1
-        
-        # Resolve Axis Names
-        subplot_index = (row - 1) * ncols + col
-        base_x_name = "xaxis" if subplot_index == 1 else f"xaxis{subplot_index}"
-        base_y_name = "yaxis" if subplot_index == 1 else f"yaxis{subplot_index}"
-        
-        # --- DOMAIN MANAGEMENT ---
-        # 1. Get original domain (default [0,1] if not found)
-        # make_subplots pre-populates these, so we can read them.
-        try:
-            old_domain = fig.layout[base_x_name].domain
-            if not old_domain: old_domain = [0, 1]
-        except:
-            old_domain = [0, 1]
-            
-        d_start, d_end = old_domain
-        
-        # 2. Calculate space needed for EXTRA axes (vars 3, 4, etc.)
-        # Variable 1 is Left. Variable 2 is Right (anchored to X). 
-        # Variable 3+ need their own space.
-        extras_count = max(0, len(y_list) - 2)
-        
-        # We reserve roughly 0.08 (8% of width) per extra axis
-        # You can tweak 'width_per_axis' if labels are getting cut off
-        width_per_axis = 0.08 
-        required_space = extras_count * width_per_axis
-        
-        # 3. Shrink the X-axis to make room
-        new_d_end = d_end - required_space
-        # Safety check: don't invert axis if too many vars
-        if new_d_end <= d_start + 0.1: new_d_end = d_end 
-        
-        # Apply new domain to the subplot's X-axis
-        fig.layout[base_x_name].domain = [d_start, new_d_end]
 
-        # --- DATA PREP ---
-        df = dataset.df.copy()
-        if dataset.order == 'index': df = df.sort_index()
-        elif dataset.order: df = df.sort_values(by=dataset.order)
-        
-        if x not in df.columns:
-            cols_upper = {c.upper(): c for c in df.columns}
-            if x.upper() in cols_upper: x_col = cols_upper[x.upper()]
-            else: continue
-        else:
+        base_df = dataset.df
+        if x in base_df.columns:
             x_col = x
+        else:
+            cols_upper = {c.upper(): c for c in base_df.columns}
+            x_col = cols_upper.get(str(x).upper())
+            if not x_col:
+                continue
 
-        for idx_y, yi in enumerate(y_list):
-            if yi not in df.columns: continue
-            
-            var_color = color_cycle[idx_y % len(color_cycle)]
-            custom_data = df[[x_col, yi] + [c for c in (display_parms or []) if c in df.columns]]
-            ht = f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}<br>{yi}: %{{customdata[1]:.2f}}"
-            specific_limit = axis_limits.get(yi, None)
+        valid_hover = [p for p in (display_parms or []) if p in base_df.columns]
+        req_cols = list(dict.fromkeys(
+            [x_col] + [yi for yi in y_list if yi in base_df.columns]
+            + valid_hover
+            + ([dataset.order] if dataset.order and dataset.order != 'index'
+               and dataset.order in base_df.columns else [])
+        ))
+        df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
+        if dataset.order == 'index':
+            df = df.sort_index()
+        elif dataset.order:
+            df = df.sort_values(by=dataset.order)
 
-            # Styling
-            line_dict = dict(color=var_color, width=dataset.linewidth)
-            if dataset.linestyle: line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
+        line_dict = dict(width=dataset.linewidth)
+        if dataset.linestyle:
+            line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
 
-            if idx_y == 0:
-                # --- PRIMARY AXIS (LEFT) ---
-                fig.add_trace(go.Scatter(
-                    x=df[x_col], y=df[yi],
+        if primary_y in df.columns:
+            color0 = color_cycle[0]
+            cd_cols = list(dict.fromkeys([x_col, primary_y] + valid_hover))
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}"
+                  f"<br>{primary_y}: %{{customdata[1]:.2f}}<extra></extra>")
+            fig.add_trace(
+                go.Scatter(
+                    x=df[x_col], y=df[primary_y],
                     mode='lines+markers' if dataset.linestyle else 'markers',
-                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
-                    marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht
-                ), row=row, col=col)
-                
-                # Update base Y-axis
-                u_dict = dict(title_text=yi, title_font=dict(color=var_color), tickfont=dict(color=var_color), row=row, col=col)
-                if specific_limit: u_dict['range'] = specific_limit
-                fig.update_yaxes(**u_dict)
-
-            elif idx_y == 1:
-                # --- SECONDARY AXIS (Standard Right) ---
-                # This one is "free" (doesn't need custom positioning), 
-                # it just anchors to the (now shrunk) X-axis and sits on the right edge.
-                
-                # We need a new axis object, but we anchor it to the subplot's x
-                curr_y_axis = f"yaxis{next_free_axis_idx}"
-                curr_y_ref = f"y{next_free_axis_idx}"
-                next_free_axis_idx += 1
-                
-                fig.add_trace(go.Scatter(
-                    x=df[x_col], y=df[yi],
-                    mode='lines+markers' if dataset.linestyle else 'markers',
-                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
-                    marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht,
-                    xaxis=base_x_name.replace("axis", ""), # e.g. "x2"
-                    yaxis=curr_y_ref
-                ))
-                
-                layout_axis = dict(
-                    title=yi,
-                    title_font=dict(color=var_color),
-                    tickfont=dict(color=var_color),
-                    anchor=base_x_name.replace("axis", ""), # Anchors to x, so sits at x-domain end
-                    overlaying=base_y_name.replace("axis", ""), # y, y2, etc
-                    side='right',
-                    showgrid=False
-                )
-                if specific_limit: layout_axis['range'] = specific_limit
-                fig.update_layout({curr_y_axis: layout_axis})
-                
+                    name=primary_y, legendgroup=primary_y,
+                    showlegend=(idx_ds == 0),
+                    marker=dict(color=color0, size=dataset.markersize or 6),
+                    line=dict(color=color0, **line_dict),
+                    customdata=df[cd_cols], hovertemplate=ht,
+                ),
+                row=row, col=col,
+                secondary_y=False if use_secondary else None,
+            )
+            kw = dict(title_text=primary_y,
+                      title_font=dict(color=color0),
+                      tickfont=dict(color=color0),
+                      row=row, col=col)
+            if primary_y in axis_limits:
+                kw['range'] = axis_limits[primary_y]
+            if use_secondary:
+                fig.update_yaxes(secondary_y=False, **kw)
             else:
-                # --- TERTIARY+ AXES (Floating Right) ---
-                # These sit in the empty space we created by shrinking the domain.
-                
-                curr_y_axis = f"yaxis{next_free_axis_idx}"
-                curr_y_ref = f"y{next_free_axis_idx}"
-                next_free_axis_idx += 1
-                
-                # We place them iteratively
-                extra_idx = idx_y - 1 # 1st extra, 2nd extra...
-                pos = new_d_end + (extra_idx * width_per_axis)
-                # Cap at 1.0 just in case
-                pos = min(0.99, pos) 
-                
-                fig.add_trace(go.Scatter(
+                fig.update_yaxes(**kw)
+
+        for k, yi in enumerate(secondary_ys):
+            if yi not in df.columns:
+                continue
+            color_k = color_cycle[(k + 1) % len(color_cycle)]
+            cd_cols = list(dict.fromkeys([x_col, yi] + valid_hover))
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}"
+                  f"<br>{yi}: %{{customdata[1]:.2f}}<extra></extra>")
+            fig.add_trace(
+                go.Scatter(
                     x=df[x_col], y=df[yi],
                     mode='lines+markers' if dataset.linestyle else 'markers',
-                    name=yi, legendgroup=yi, showlegend=(idx_ds == 0),
-                    marker=dict(color=var_color, size=dataset.markersize or 6),
-                    line=line_dict,
-                    customdata=custom_data, hovertemplate=ht,
-                    xaxis=base_x_name.replace("axis", ""),
-                    yaxis=curr_y_ref
-                ))
-                
-                layout_axis = dict(
-                    title=yi,
-                    title_font=dict(color=var_color),
-                    tickfont=dict(color=var_color),
-                    anchor="free",          # Free floating
-                    overlaying=base_y_name.replace("axis", ""),
-                    side='right',
-                    position=pos,           # Explicit position in [0, 1]
-                    showgrid=False
-                )
-                if specific_limit: layout_axis['range'] = specific_limit
-                fig.update_layout({curr_y_axis: layout_axis})
+                    name=yi, legendgroup=yi,
+                    showlegend=(idx_ds == 0),
+                    marker=dict(
+                        color=color_k,
+                        size=dataset.markersize or 6,
+                        symbol='circle' if k == 0 else 'diamond',
+                    ),
+                    line=dict(color=color_k, **line_dict),
+                    customdata=df[cd_cols], hovertemplate=ht,
+                ),
+                row=row, col=col, secondary_y=True,
+            )
 
-        # Final cleanup for the subplot
-        fig.update_xaxes(title_text=x, showgrid=True, row=row, col=col)
-        if x_lim: fig.update_xaxes(range=x_lim, row=row, col=col)
+        if use_secondary and secondary_ys:
+            color1 = color_cycle[1]
+            kw = dict(title_text=secondary_ys[0],
+                      title_font=dict(color=color1),
+                      tickfont=dict(color=color1),
+                      showgrid=False, row=row, col=col)
+            if secondary_ys[0] in axis_limits:
+                kw['range'] = axis_limits[secondary_ys[0]]
+            fig.update_yaxes(secondary_y=True, **kw)
 
-    if return_axes: return fig 
-    fig.show()
-    return fig
+        fig.update_xaxes(title_text=x, row=row, col=col)
+        if x_lim:
+            fig.update_xaxes(range=x_lim, row=row, col=col)
+
+    return _show_or_return(fig, return_axes)
 
 def unibar(list_of_datasets, x, y, barmode='group', color=None, 
            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
@@ -753,28 +898,17 @@ def unibar(list_of_datasets, x, y, barmode='group', color=None,
     """
     y_list = y if isinstance(y, list) else [y]
     n_y = len(y_list)
-
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
-        nrows = int(np.ceil(n_y / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+    nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or f"Bar Comparison: {x}", 'x': 0.5},
-        'barmode': barmode,
-        'showlegend': True
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or f"Bar Comparison: {x}", figsize,
+        barmode=barmode, showlegend=True
+    ))
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -789,14 +923,11 @@ def unibar(list_of_datasets, x, y, barmode='group', color=None,
                 showlegend=(idx_y == 0)
             ), row=row, col=col)
 
-    # Final Axis formatting
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or "Value")
     if y_lim: fig.update_yaxes(range=y_lim)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
@@ -808,24 +939,14 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
     active_ds = [d for d in list_of_datasets if d.select]
     y_list = y if isinstance(y, list) else [y]
     n_sets = len(active_ds)
-
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
-        nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
     color_cycle = px.colors.qualitative.Plotly
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or "Dataset Bar Comparison", 'x': 0.5},
-        'barmode': barmode,
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Dataset Bar Comparison", figsize,
+        barmode=barmode
+    ))
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -845,9 +966,7 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
     fig.update_xaxes(title_text=x)
     if y_lim: fig.update_yaxes(range=y_lim)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
            color=None, suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
@@ -856,41 +975,25 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
     """
     Boxplot version of uniplot.
     Subplots are organized by Y-variables.
-    
-    Parameters:
-    - points: 'all', 'outliers', 'suspectedoutliers', or False
-    - notched: True/False (for confidence intervals)
     """
     y_list = y if isinstance(y, list) else [y]
     n_y = len(y_list)
-
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_y)))))
-        nrows = int(np.ceil(n_y / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_y / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_y / nrows))
+    nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or f"Boxplot Comparison: {x}", 'x': 0.5},
-        'boxmode': boxmode,
-        'showlegend': True
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or f"Boxplot Comparison: {x}", figsize,
+        boxmode=boxmode, showlegend=True
+    ))
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
             if yi not in df.columns: continue
 
-            # Create Box Trace
             fig.add_trace(go.Box(
                 x=df[x], 
                 y=df[yi],
@@ -904,14 +1007,11 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
                 showlegend=(idx_y == 0)
             ), row=row, col=col)
 
-    # Final Axis formatting
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or "Value")
     if y_lim: fig.update_yaxes(range=y_lim)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers', notched=False,
                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
@@ -923,24 +1023,14 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     active_ds = [d for d in list_of_datasets if d.select]
     y_list = y if isinstance(y, list) else [y]
     n_sets = len(active_ds)
-
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
-        nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
     color_cycle = px.colors.qualitative.Plotly
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or "Dataset Box Comparison", 'x': 0.5},
-        'boxmode': boxmode,
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Dataset Box Comparison", figsize,
+        boxmode=boxmode
+    ))
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -963,9 +1053,7 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     fig.update_xaxes(title_text=x)
     if y_lim: fig.update_yaxes(range=y_lim)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 
 def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
@@ -979,36 +1067,19 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
     """
     x_list = x if isinstance(x, list) else [x]
     n_x = len(x_list)
-    
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_x)))))
-        nrows = int(np.ceil(n_x / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_x / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_x / nrows))
+    nrows, ncols = _calc_grid(n_x, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or x_list)
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Distribution Comparison", figsize,
+        barmode=barmode, showlegend=True
+    ))
 
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or f"Distribution Comparison", 'x': 0.5},
-        'barmode': barmode,
-        'showlegend': True
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    
-    fig.update_layout(**layout_args)
-    
-    # Construct explicit binning logic
-    xbins_dict = {}
-    if bin_size is not None: xbins_dict['size'] = bin_size
-    if bin_start is not None: xbins_dict['start'] = bin_start
-    if bin_end is not None: xbins_dict['end'] = bin_end
-    xbins = xbins_dict if xbins_dict else None
+    xbins = _build_xbins(bin_size, bin_start, bin_end)
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df.copy()
+        df = ds.df
         
         use_color = color if color else ds.color
 
@@ -1030,7 +1101,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 marker_color=use_color,
                 opacity=opacity,
                 nbinsx=nbins,
-                xbins=xbins,  # Injects exact bin width/range if specified
+                xbins=xbins,
                 histnorm=histnorm,
                 showlegend=(idx_x == 0)
             )
@@ -1042,13 +1113,11 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
             fig.add_trace(go.Histogram(**trace_args), row=row, col=col)
 
     if x_lim: fig.update_xaxes(range=x_lim)
-    
+
     y_label = f"Sum of {y}" if y else ("Density" if "density" in histnorm else "Count")
     fig.update_yaxes(title_text=y_label)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
                             bin_size=None, bin_start=None, bin_end=None,
@@ -1066,36 +1135,20 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
         print("No datasets selected.")
         return None
 
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
-        nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds])
     color_cycle = px.colors.qualitative.Plotly
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Dataset Distribution Analysis", figsize,
+        barmode=barmode, showlegend=True
+    ))
 
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or "Dataset Distribution Analysis", 'x': 0.5},
-        'barmode': barmode,
-        'showlegend': True
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    
-    fig.update_layout(**layout_args)
-    
-    # Construct explicit binning logic
-    xbins_dict = {}
-    if bin_size is not None: xbins_dict['size'] = bin_size
-    if bin_start is not None: xbins_dict['start'] = bin_start
-    if bin_end is not None: xbins_dict['end'] = bin_end
-    xbins = xbins_dict if xbins_dict else None
+    xbins = _build_xbins(bin_size, bin_start, bin_end)
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df.copy()
+        df = ds.df
         
         for idx_x, xi in enumerate(x_list):
             if xi not in df.columns: continue
@@ -1120,7 +1173,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
                 marker_color=use_color,
                 opacity=opacity,
                 nbinsx=nbins,
-                xbins=xbins, # Injects exact bin width/range if specified
+                xbins=xbins,
                 histnorm=histnorm,
                 showlegend=(idx_ds == 0)
             )
@@ -1132,13 +1185,11 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
             fig.add_trace(go.Histogram(**trace_args), row=row, col=col)
 
     if x_lim: fig.update_xaxes(range=x_lim)
-    
+
     y_label = f"Sum of {y}" if y else ("Density" if "density" in histnorm else "Count")
     fig.update_yaxes(title_text=y_label)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                interpolate=True, interp_res=100, interp_method='linear',
@@ -1159,30 +1210,18 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
         print("No datasets selected.")
         return None
 
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_z)))))
-        nrows = int(np.ceil(n_z / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_z / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_z / nrows))
+    nrows, ncols = _calc_grid(n_z, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or z_list, horizontal_spacing=0.15)
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {
-            'text': suptitle or f"Contour: {y} vs {x}",
-            'x': 0.5, 'xanchor': 'center',
-            'y': 0.98, 'yanchor': 'top', 'yref': 'container'
-        },
-        'showlegend': True,
-        'margin': dict(r=100) 
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, None, figsize,
+        title={'text': suptitle or f"Contour: {y} vs {x}", 'x': 0.5, 'xanchor': 'center', 'y': 0.98, 'yanchor': 'top', 'yref': 'container'},
+        showlegend=True, margin=dict(r=100, t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    ))
 
     for idx_ds, ds in enumerate(active_ds):
-        df = ds.df.copy()
+        df = ds.df
         if x not in df.columns or y not in df.columns: 
             continue
 
@@ -1200,10 +1239,12 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                     clean_df[x], clean_df[y], clean_df[zi], 
                     res=interp_res, method=interp_method
                 )
+                if plot_x is None:
+                    print(f"Skipping contour trace for set {ds.index} (Z={zi}): Insufficient points or collinear data.")
+                    continue
             else:
                 plot_x, plot_y, plot_z = clean_df[x], clean_df[y], clean_df[zi]
 
-            # Resolve Z-limits for color scaling
             z_lim = axis_limits.get(zi)
             zmin, zmax = z_lim if z_lim else (None, None)
 
@@ -1230,6 +1271,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                 ncontours=ncontours, 
                 line=dict(width=ds.linewidth, color=ds.color if use_coloring=='lines' else None),
                 showscale=(idx_ds == 0),
+                showlegend=(idx_z == 0),
                 colorbar=dict(
                     title=zi,
                     x=cb_x,
@@ -1243,10 +1285,7 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or y)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
-
+    return _show_or_return(fig, return_axes)
 
 def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                            interpolate=True, interp_res=100, interp_method='linear',
@@ -1265,26 +1304,19 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
         print("No datasets selected.")
         return None
 
-    if nrows is None and ncols is None:
-        ncols = min(3, max(1, int(np.ceil(np.sqrt(n_sets)))))
-        nrows = int(np.ceil(n_sets / ncols))
-    elif nrows is None: nrows = int(np.ceil(n_sets / ncols))
-    elif ncols is None: ncols = int(np.ceil(n_sets / nrows))
+    nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=[d.title_format for d in active_ds], horizontal_spacing=0.15)
-
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or f"Dataset Contour Comparison", 'x': 0.5, 'y': 0.98, 'yref': 'container'},
-        'margin': dict(r=100)
-    }
-    if figsize:
-        layout_args['width'], layout_args['height'] = figsize[0] * 100, figsize[1] * 100
-    fig.update_layout(**layout_args)
+    fig.update_layout(**_base_layout(
+        darkmode, None, figsize,
+        title={'text': suptitle or "Dataset Contour Comparison", 'x': 0.5, 'y': 0.98, 'yref': 'container'},
+        showlegend=True, margin=dict(r=100, t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    ))
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df.copy()
+        df = ds.df
         
         if x not in df.columns or y not in df.columns: continue
 
@@ -1304,7 +1336,6 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
             else:
                 plot_x, plot_y, plot_z = clean_df[x], clean_df[y], clean_df[zi]
 
-            # Resolve Z-limits for color scaling
             z_lim = axis_limits.get(zi)
             zmin, zmax = z_lim if z_lim else (None, None)
 
@@ -1328,8 +1359,9 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                 legendgroup=zi,
                 colorscale=colorscale or ds.hue_palette,
                 contours_coloring=use_coloring,
-                ncontours=ncontours, 
+                ncontours=ncontours,
                 showscale=(idx_ds == 0),
+                showlegend=(idx_ds == 0),
                 colorbar=dict(
                     title=zi,
                     x=cb_x,
@@ -1343,9 +1375,7 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
     fig.update_xaxes(title_text=x)
     fig.update_yaxes(title_text=y)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmode=False,
                          figsize=(12, 8), axis_limits=None, return_axes=False):
@@ -1354,9 +1384,6 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
     and the bars are the different Y-variables, each scaled to their own Y-axis.
     Includes an 'agg' parameter to handle multi-row datasets.
     """
-    import plotly.graph_objects as go
-    import plotly.express as px
-
     active_ds = [d for d in list_of_datasets if d.select]
     if not active_ds:
         print("No datasets selected.")
@@ -1368,20 +1395,16 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
 
     fig = go.Figure()
 
-    # 1. Setup X-Axis Categories
     x_labels = [f"{ds.index}: {ds.title}" for ds in active_ds]
 
-    # 2. Domain Management for Extra Y-Axes
     extras_count = max(0, len(y_list) - 2)
     width_per_axis = 0.08
     required_space = extras_count * width_per_axis
     x_domain_end = max(0.5, 1.0 - required_space) 
 
-    # 3. Add Traces and Axes
     for idx_y, yi in enumerate(y_list):
         var_color = color_cycle[idx_y % len(color_cycle)]
 
-        # Extract data with the chosen aggregation method
         y_data = []
         for ds in active_ds:
             if yi in ds.df.columns:
@@ -1404,17 +1427,15 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
 
         y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
-        # Add the Bar Trace
         fig.add_trace(go.Bar(
             name=yi,
             x=x_labels,
             y=y_data,
             yaxis=y_axis_name,
-            offsetgroup=str(idx_y), # Forces grouping across multiple Y-axes
+            offsetgroup=str(idx_y),
             marker_color=var_color
         ))
 
-        # Configure the Layout for this Axis
         axis_layout = dict(
             title=yi,
             title_font=dict(color=var_color),
@@ -1425,7 +1446,6 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
         if yi in axis_limits:
             axis_layout['range'] = axis_limits[yi]
 
-        # Anchor logic for positioning axes
         if idx_y == 0:
             fig.update_layout(yaxis=axis_layout)
         elif idx_y == 1:
@@ -1436,24 +1456,14 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
             axis_layout.update(dict(overlaying='y', side='right', anchor='free', position=pos))
             fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
 
-    # 4. Final Layout Adjustments
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or f"Variables by Dataset ({agg})", 'x': 0.5},
-        'barmode': 'group',
-        'xaxis': dict(domain=[0, x_domain_end], title="Dataset"),
-        'margin': dict(r=50 + (extras_count * 80)) 
-    }
-    
-    if figsize:
-        layout_args['width'] = figsize[0] * 100
-        layout_args['height'] = figsize[1] * 100
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or f"Variables by Dataset ({agg})", figsize,
+        barmode='group',
+        xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
+        margin=dict(r=50 + (extras_count * 80))
+    ))
 
-    fig.update_layout(**layout_args)
-
-    if return_axes: return fig
-    fig.show()
-    return fig
+    return _show_or_return(fig, return_axes)
 
 def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers', notched=False,
                          suptitle=None, darkmode=False, figsize=(12, 8), axis_limits=None, return_axes=False):
@@ -1461,9 +1471,6 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
     Creates a single grouped box plot where the X-axis is the Dataset name,
     and the boxes are the different Y-variables, each scaled to their own Y-axis.
     """
-    import plotly.graph_objects as go
-    import plotly.express as px
-
     active_ds = [d for d in list_of_datasets if d.select]
     if not active_ds:
         print("No datasets selected.")
@@ -1475,17 +1482,14 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
 
     fig = go.Figure()
 
-    # 1. Domain Management for Extra Y-Axes
     extras_count = max(0, len(y_list) - 2)
     width_per_axis = 0.08
     required_space = extras_count * width_per_axis
     x_domain_end = max(0.5, 1.0 - required_space) 
 
-    # 2. Add Traces and Axes
     for idx_y, yi in enumerate(y_list):
         var_color = color_cycle[idx_y % len(color_cycle)]
 
-        # Extract all valid data for this specific variable across all datasets
         all_y_data = []
         all_x_labels = []
         
@@ -1493,31 +1497,26 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
             if yi in ds.df.columns:
                 valid_data = ds.df[yi].dropna()
                 if not valid_data.empty:
-                    # Append the raw values
                     all_y_data.extend(valid_data.values)
-                    # Append the corresponding dataset name for each value
                     label = f"{ds.index}: {ds.title}"
                     all_x_labels.extend([label] * len(valid_data))
 
-        # Skip trace if no data was found for this variable across all datasets
         if not all_y_data:
             continue
 
         y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
-        # Add the Box Trace
         fig.add_trace(go.Box(
             name=yi,
             x=all_x_labels,
             y=all_y_data,
             yaxis=y_axis_name,
-            offsetgroup=str(idx_y), # Forces grouping across multiple Y-axes
+            offsetgroup=str(idx_y),
             marker_color=var_color,
             boxpoints=points,
             notched=notched,
         ))
 
-        # Configure the Layout for this Axis
         axis_layout = dict(
             title=yi,
             title_font=dict(color=var_color),
@@ -1528,7 +1527,6 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
         if yi in axis_limits:
             axis_layout['range'] = axis_limits[yi]
 
-        # Anchor logic for positioning axes
         if idx_y == 0:
             fig.update_layout(yaxis=axis_layout)
         elif idx_y == 1:
@@ -1539,24 +1537,198 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
             axis_layout.update(dict(overlaying='y', side='right', anchor='free', position=pos))
             fig.update_layout({f"yaxis{idx_y + 1}": axis_layout})
 
-    # 3. Final Layout Adjustments
-    layout_args = {
-        'template': "plotly_dark" if darkmode else "plotly_white",
-        'title': {'text': suptitle or "Variables by Dataset", 'x': 0.5},
-        'boxmode': boxmode,
-        'xaxis': dict(domain=[0, x_domain_end], title="Dataset"),
-        'margin': dict(r=50 + (extras_count * 80)) 
-    }
-    
-    if figsize:
-        layout_args['width'] = figsize[0] * 100
-        layout_args['height'] = figsize[1] * 100
+    fig.update_layout(**_base_layout(
+        darkmode, suptitle or "Variables by Dataset", figsize,
+        boxmode=boxmode,
+        xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
+        margin=dict(r=50 + (extras_count * 80))
+    ))
 
-    fig.update_layout(**layout_args)
+    return _show_or_return(fig, return_axes)
 
-    if return_axes: return fig
-    fig.show()
-    return fig
+
+# -----------------------------------------------------------------------------
+# NEW: Multi-Y-Axis Scatter/Line Plot
+# -----------------------------------------------------------------------------
+def uniplot_ymultaxis(list_of_datasets, x, y,
+                        variable_formats=None, display_parms=None,
+                        suptitle=None, xlabel=None,
+                        darkmode=False, figsize=(12, 8),
+                        x_lim=None, axis_limits=None,
+                        legend='right', legend_group_by='sets', return_axes=False):
+    """
+    Single-plot, multi-Y-axis scatter/line chart.
+
+    All selected datasets are overlaid on the same x-axis. Each y variable
+    in `y` gets its own y-axis (left for the first, right for the second,
+    further right for the third+). One trace per (dataset × variable).
+
+    Formatting precedence (per attribute):
+        variable_formats[var][attr]   →   if set, use this
+        dataset.<attr>                →   otherwise, fall back to dataset
+
+    This is intentionally per-attribute, so you can do things like
+    "set linestyle on the variable, but let color come from the dataset",
+    or vice versa.
+
+    Parameters
+    ----------
+    list_of_datasets : list[Dataset]
+    x : str
+        X-column name (shared across all traces).
+    y : str | list[str]
+        One or more y-column names. Each gets its own y-axis.
+    variable_formats : dict[str, dict] | None
+        Per-variable overrides, e.g.
+            {'Temp': {'linestyle': '--'}, 'Pressure': {'color': 'blue'}}
+        Recognized keys: color, marker, linestyle, markersize, linewidth, alpha.
+    display_parms : list[str] | None
+        Extra columns to surface in the hover tooltip.
+    axis_limits : dict[str, tuple] | None
+        Per-column (min, max) limits. Applies to x and to any y axis.
+    legend : 'right' | 'above' | 'off'
+    """
+    variable_formats = variable_formats or {}
+    axis_limits = axis_limits or {}
+
+    active = [d for d in list_of_datasets if d.select]
+    if not active:
+        print("No datasets selected.")
+        return None
+
+    y_list = y if isinstance(y, list) else [y]
+    if not y_list:
+        raise ValueError("At least one y variable is required.")
+
+    # Domain math: extra y-axes (3+) live to the right of the plot.
+    extras = max(0, len(y_list) - 2)
+    width_per_axis = 0.06
+    x_domain_end = max(0.5, 1.0 - extras * width_per_axis)
+
+    # Axis label colors: only apply when explicitly set in variable_formats.
+    axis_label_colors = {yi: variable_formats.get(yi, {}).get('color') for yi in y_list}
+
+    fig = go.Figure()
+
+    for ds in active:
+        base_df = ds.df
+        if x not in base_df.columns:
+            continue
+
+        ds_hover = display_parms if display_parms is not None else getattr(ds, 'display_parms', [])
+        valid_hover = [p for p in (ds_hover or []) if p in base_df.columns]
+
+        for idx_y, yi in enumerate(y_list):
+            if yi not in base_df.columns:
+                continue
+
+            fmt = _resolve_var_format(ds, yi, variable_formats)
+
+            # Slice down to only the columns we need (dedup-safe)
+            req_cols = list(dict.fromkeys([x, yi] + valid_hover))
+            df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
+
+            order_col = getattr(ds, 'order', None)
+            if order_col == 'index':
+                df = df.sort_index()
+            elif order_col and order_col in df.columns:
+                df = df.sort_values(by=order_col)
+            else:
+                df = df.sort_index()
+
+            # Mode: lines if linestyle set, markers if marker set; default markers
+            parts = []
+            if fmt['linestyle']:
+                parts.append('lines')
+            if fmt['marker'] or not fmt['linestyle']:
+                parts.append('markers')
+            mode = '+'.join(parts) if parts else 'markers'
+
+            # Hover
+            ht = (f"<b>Set {ds.index}: {ds.title}</b><br>"
+                  f"<b>{yi}</b><br>"
+                  f"{x}: %{{x:.4g}}<br>"
+                  f"{yi}: %{{y:.4g}}")
+            customdata = None
+            if valid_hover:
+                customdata = df[valid_hover]
+                for i, p in enumerate(valid_hover):
+                    if pd.api.types.is_numeric_dtype(df[p]):
+                        ht += f"<br>{p}: %{{customdata[{i}]:.4g}}"
+                    else:
+                        ht += f"<br>{p}: %{{customdata[{i}]}}"
+            ht += "<extra></extra>"
+
+            y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
+
+            fig.add_trace(go.Scatter(
+                x=df[x], y=df[yi],
+                mode=mode,
+                name=f"{ds.index}: {ds.title}" if legend_group_by == 'vars' else yi,
+                yaxis=y_axis_name,
+                legendgroup=f"var_{yi}" if legend_group_by == 'vars' else f"set_{ds.index}",
+                legendgrouptitle_text=yi if legend_group_by == 'vars' else f"{ds.index}: {ds.title}",
+                marker=dict(
+                    size=fmt['markersize'],
+                    symbol=get_plotly_marker(fmt['marker']),
+                    color=fmt['color'],
+                    opacity=fmt['alpha'],
+                    line=dict(width=fmt['edgewidth'], color=fmt['edge_color']),
+                ),
+                line=dict(
+                    width=fmt['linewidth'],
+                    dash=get_plotly_linestyle(fmt['linestyle']) or 'solid',
+                    color=fmt['color'],
+                ),
+                customdata=customdata,
+                hovertemplate=ht,
+            ))
+
+    # Configure each y-axis (color only applied when explicitly set via variable_formats)
+    for idx_y, yi in enumerate(y_list):
+        ax_color = axis_label_colors[yi]
+        title_kw = dict(text=yi)
+        if ax_color:
+            title_kw['font'] = dict(color=ax_color)
+        ax = dict(title=title_kw, showgrid=(idx_y == 0))
+        if ax_color:
+            ax['tickfont'] = dict(color=ax_color)
+        if yi in axis_limits:
+            ax['range'] = axis_limits[yi]
+
+        if idx_y == 0:
+            fig.update_layout(yaxis=ax)
+        elif idx_y == 1:
+            ax.update(dict(overlaying='y', side='right', anchor='x'))
+            fig.update_layout(yaxis2=ax)
+        else:
+            pos = x_domain_end + (idx_y - 1) * width_per_axis
+            ax.update(dict(overlaying='y', side='right', anchor='free', position=pos))
+            fig.update_layout({f"yaxis{idx_y + 1}": ax})
+
+    # Layout
+    layout_extras = dict(
+        showlegend=(legend != 'off'),
+        xaxis=dict(domain=[0, x_domain_end], title=xlabel or x),
+        margin=dict(r=60 + extras * 70, t=120 if legend == 'above' else 100),
+    )
+    if x_lim:
+        layout_extras['xaxis']['range'] = x_lim
+    elif x in axis_limits:
+        layout_extras['xaxis']['range'] = axis_limits[x]
+
+    if legend == 'above':
+        layout_extras['legend'] = dict(orientation='h', yanchor='bottom',
+                                       y=1.01, xanchor='center', x=0.5)
+
+    fig.update_layout(**_base_layout(
+        darkmode,
+        suptitle or f"{', '.join(y_list)} vs {x}",
+        figsize,
+        **layout_extras,
+    ))
+
+    return _show_or_return(fig, return_axes)
 
 class UnichartNotebook:
     def __init__(self):
@@ -1590,10 +1762,17 @@ class UnichartNotebook:
 
         self.parm_description_dict = {}
 
+        # Per-variable formatting overrides (used by plot_ymult / uniplot_ymultaxis).
+        # Shape: {variable_name: {attr: value}} where attr ∈ _VAR_FORMAT_KEYS.
+        self.variable_formats = {}
+
         self.suptitle_size = None
         self.legend_size = None
         self.axes_title_size = None
         self.axes_tick_size = None
+        self.subplot_title_size = None
+        self.colorbar_size = None
+        self.hover_size = None
         
         print("UniChart Notebook Environment Initialized.")
 
@@ -1604,10 +1783,9 @@ class UnichartNotebook:
         """
         Load a DataFrame into the environment as datasets.
         """
-        # Auto-title logic
         if not title:
             if set_name_column and set_name_column in df.columns:
-                pass # Title will be derived from group
+                pass
             elif "TITLE" in df.columns:
                 set_name_column = "TITLE"
             else:
@@ -1615,7 +1793,7 @@ class UnichartNotebook:
                 set_name_column = "TITLE"
 
             if set_idx_column and set_idx_column in df.columns:
-                pass # Index will be derived from group
+                pass
             elif "SETNUMBER" in df.columns:
                 set_idx_column = "SETNUMBER"
             elif "INDEX" in df.columns:
@@ -1625,7 +1803,6 @@ class UnichartNotebook:
 
         next_index = len(self.uset)
         
-        # Group and create Dataset objects
         if set_idx_column and set_idx_column in df.columns:
             for set_index, df_subset in df.groupby(set_idx_column):
 
@@ -1682,24 +1859,50 @@ class UnichartNotebook:
     # Selection & Filtering
     # ------------------------------------------------------------------
     def _get_uset_slice(self, uset_slice):
-        """Helper to normalize input into a list of datasets"""
-        if uset_slice is None:
-            return self.uset
-        elif uset_slice == 'all':
-            return self.uset
-        elif isinstance(uset_slice, int):
-            # Check bounds
+        """Helper to normalize input into a list of datasets.
+
+        Accepts:
+            None | 'all'    -> all datasets
+            int             -> dataset at that index
+            str             -> dataset(s) whose title matches exactly
+            Dataset         -> wrapped in a list
+            list            -> mixed list of any of the above
+        Unknown items are silently skipped (no string accidentally treated
+        as a Dataset).
+        """
+        if uset_slice is None or uset_slice == 'all':
+            return list(self.uset)
+
+        if isinstance(uset_slice, Dataset):
+            return [uset_slice]
+
+        if isinstance(uset_slice, int) and not isinstance(uset_slice, bool):
             if 0 <= uset_slice < len(self.uset):
                 return [self.uset[uset_slice]]
             return []
-        elif isinstance(uset_slice, list):
-            # List of indices or objects
-            return [d for i, d in enumerate(self.uset) if i in uset_slice or d in uset_slice]
-        return [uset_slice]
+
+        if isinstance(uset_slice, str):
+            matches = [d for d in self.uset if d.title == uset_slice]
+            if not matches:
+                print(f"Warning: no dataset with title {uset_slice!r}.")
+            return matches
+
+        if isinstance(uset_slice, (list, tuple, set)):
+            result = []
+            seen_ids = set()
+            for item in uset_slice:
+                for d in self._get_uset_slice(item):
+                    if id(d) not in seen_ids:
+                        result.append(d)
+                        seen_ids.add(id(d))
+            return result
+
+        print(f"Warning: don't know how to interpret {uset_slice!r} as a dataset selector.")
+        return []
 
     def select(self, uset_slice=None):
         """Select the specified dataset(s)."""
-        for ds in self.uset: ds.select = False # Exclusive select logic from original
+        for ds in self.uset: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
         self._refresh_widgets()
@@ -1766,10 +1969,6 @@ class UnichartNotebook:
     def markersize(self, uset_slice, size_val):
         """
         Set the marker size for the specified dataset(s).
-        
-        Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            size_val (int or float): Size of the marker (e.g., 5, 10.5).
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.markersize = size_val
@@ -1777,10 +1976,6 @@ class UnichartNotebook:
     def linewidth(self, uset_slice, width_val):
         """
         Set the line thickness for the specified dataset(s).
-        
-        Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            width_val (int or float): Thickness of the line (e.g., 1, 2.5).
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.linewidth = width_val
@@ -1788,10 +1983,6 @@ class UnichartNotebook:
     def hue(self, uset_slice, col_name):
         """
         Map a dataframe column to the color scale for the specified dataset(s).
-        
-        Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            col_name (str): Name of the column to color by (e.g., 'Temperature', 'Category').
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.hue = col_name
@@ -1799,11 +1990,6 @@ class UnichartNotebook:
     def hue_palette(self, uset_slice, hue_palette):
         """
         Set the color scale/palette used when `hue` is mapped to a variable.
-        
-        Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            hue_palette (str or list): A Plotly colorscale name (e.g., 'Viridis', 'Plasma', 'Inferno')
-                                       or a discrete sequence (e.g., px.colors.qualitative.Pastel).
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.hue_palette = hue_palette
@@ -1811,11 +1997,6 @@ class UnichartNotebook:
     def alpha(self, uset_slice, alpha_val):
         """
         Set the opacity (alpha) for the specified dataset(s).
-        
-        Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            alpha_val (float): Opacity value between 0.0 (fully transparent) and 1.0 (fully opaque).
-                               Example: 0.5.
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.alpha = alpha_val
@@ -1823,6 +2004,286 @@ class UnichartNotebook:
     def plot_type(self, uset_slice, type_val):
         for ds in self._get_uset_slice(uset_slice):
             ds.plot_type = type_val
+
+    def reg_order(self, uset_slice, order):
+        """
+        Set a regression/trendline for the specified dataset(s).
+        """
+        for ds in self._get_uset_slice(uset_slice):
+            ds.reg_order = order
+
+    # ------------------------------------------------------------------
+    # NEW: Variable-level formatting overrides
+    # (These take precedence over Dataset attributes when using
+    #  plot_ymult() or uniplot_ymultaxis(). Per-attribute precedence:
+    #  variable_formats wins, otherwise the dataset attribute wins.)
+    # ------------------------------------------------------------------
+    def var_format(self, variable, color=None, marker=None, linestyle=None,
+                   markersize=None, linewidth=None, alpha=None):
+        """
+        Set persistent per-variable formatting overrides.
+
+        Variable formatting takes precedence over Dataset formatting on a
+        per-attribute basis — anything you don't set still falls back to
+        the Dataset's value at plot time.
+
+        Pass the string 'reset' as the value to clear a single attribute.
+
+        Examples
+        --------
+        nb.var_format('Temperature', linestyle='--')         # all Temp lines dashed
+        nb.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
+        nb.var_format('Pressure', color='reset')             # remove just the color override
+        """
+        fmt = self.variable_formats.setdefault(variable, {})
+        pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
+                 'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha}
+        for k, v in pairs.items():
+            if v is None:
+                continue
+            if v == 'reset':
+                fmt.pop(k, None)
+            else:
+                fmt[k] = v
+        if not fmt:
+            del self.variable_formats[variable]
+        return self.variable_formats.get(variable, {})
+
+    def clear_var_format(self, variable=None):
+        """Clear variable formatting. Pass None (or no arg) to clear everything."""
+        if variable is None:
+            self.variable_formats.clear()
+        else:
+            self.variable_formats.pop(variable, None)
+
+    def list_var_formats(self):
+        """Pretty-print current variable-level formatting."""
+        if not self.variable_formats:
+            print("No variable-level formatting set.")
+            return
+        print("Variable-level formatting (overrides dataset attributes):")
+        for var, fmt in self.variable_formats.items():
+            items = ", ".join(f"{k}={v!r}" for k, v in fmt.items())
+            print(f"  {var}: {items}")
+
+    def reset_format(self, uset_slice=None, sets=True, vars=True,
+                     lines=True, highlights=True, scale=True, fonts=True):
+        """
+        Reset formatting state back to defaults.
+
+        Parameters
+        ----------
+        uset_slice : int | list | 'all' | None
+            Which datasets to reset. None/'all' resets every dataset.
+            Ignored when `sets=False`.
+        sets : bool
+            Reset per-dataset visual attributes (color, marker, linestyle,
+            markersize, linewidth, edgewidth, alpha, hue, hue_palette,
+            reg_order) back to their Dataset.__init__ defaults.
+        vars : bool
+            Clear all variable-level formatting overrides (variable_formats).
+        lines : bool
+            Clear all stored reference lines.
+        highlights : bool
+            Clear all stored highlight regions.
+        scale : bool
+            Clear all stored axis limits (axis_limits).
+        fonts : bool
+            Reset all font-size overrides to None (use Plotly defaults).
+
+        Examples
+        --------
+        nb.reset_format()                  # reset everything
+        nb.reset_format(sets=False)        # keep per-dataset formatting, clear rest
+        nb.reset_format(uset_slice=[0,1])  # only reset datasets 0 and 1
+        nb.reset_format(lines=True, highlights=True, sets=False, vars=False,
+                        scale=False, fonts=False)  # only clear decorations
+        """
+        default_colors = px.colors.qualitative.Plotly
+
+        if sets:
+            targets = (self.uset if uset_slice is None
+                       else self._get_uset_slice(uset_slice))
+            for ds in targets:
+                ds._color     = default_colors[ds.index % len(default_colors)]
+                ds._marker    = marker_map(ds.index)
+                ds._linestyle = None
+                ds.markersize = 10
+                ds.linewidth  = 2
+                ds.edgewidth  = 1
+                ds.alpha      = 1
+                ds.hue        = ""
+                ds.hue_palette = "Jet"
+                ds.hue_order  = None
+                ds.reg_order  = None
+
+        if vars:
+            self.variable_formats.clear()
+
+        if lines:
+            self.lines.clear()
+
+        if highlights:
+            self.highlights.clear()
+
+        if scale:
+            self.axis_limits.clear()
+
+        if fonts:
+            for attr in ('suptitle_size', 'legend_size', 'axes_title_size',
+                         'axes_tick_size', 'subplot_title_size',
+                         'colorbar_size', 'hover_size'):
+                setattr(self, attr, None)
+
+        parts = []
+        if sets:      parts.append("dataset formatting")
+        if vars:      parts.append("variable formats")
+        if lines:     parts.append("lines")
+        if highlights: parts.append("highlights")
+        if scale:     parts.append("axis limits")
+        if fonts:     parts.append("font sizes")
+        print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
+
+    def reg_info(self, uset_slice=None):
+        """
+        Return the parsed regression spec for the specified dataset(s).
+        """
+        KIND_LABELS = {
+            'poly':   lambda p: "Linear (degree 1)" if p == 1 else f"Polynomial (degree {p})",
+            'log':    lambda p: "Logarithmic",
+            'exp':    lambda p: "Exponential",
+            'power':  lambda p: "Power law",
+            'lowess': lambda p: f"LOWESS (frac={p})",
+            'spline': lambda p: "Cubic spline",
+            'ma':     lambda p: f"Moving average (window={p})" if p else "Moving average",
+        }
+
+        def _fit_regression(kind, param, ds, x_col, y_col, label):
+            formula = label if kind not in ('poly', 'log', 'exp', 'power') else None
+            if kind is None or x_col is None or y_col is None:
+                return formula, None
+            df = ds.df
+            if x_col not in df.columns or y_col not in df.columns:
+                return formula, None
+            try:
+                df_c = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
+                x = df_c[x_col].to_numpy(dtype=float)
+                y = df_c[y_col].to_numpy(dtype=float)
+                if len(x) < 2:
+                    return formula, None
+
+                y_pred = None
+
+                def _term(c, power, first):
+                    exp_str = {0: '', 1: 'x', 2: 'x²', 3: 'x³', 4: 'x⁴', 5: 'x⁵'}.get(power, f'x^{power}')
+                    if first:
+                        return f"{c:.4g}{exp_str}"
+                    return (f"+ {c:.4g}" if c >= 0 else f"- {abs(c):.4g}") + exp_str
+
+                if kind == 'poly':
+                    order = int(param) if param else 1
+                    if len(x) < order + 1:
+                        return formula, None
+                    p = np.poly1d(np.polyfit(x, y, order))
+                    y_pred = p(x)
+                    parts = [_term(c, order - i, i == 0) for i, c in enumerate(p.coeffs)]
+                    formula = "y = " + " ".join(parts)
+
+                elif kind == 'log':
+                    mask = x > 0
+                    if mask.sum() < 2:
+                        return formula, None
+                    a, b = np.polyfit(np.log(x[mask]), y[mask], 1)
+                    y_pred = np.where(x > 0, a * np.log(np.where(x > 0, x, 1)) + b, np.nan)
+                    b_part = f"+ {b:.4g}" if b >= 0 else f"- {abs(b):.4g}"
+                    formula = f"y = {a:.4g}·ln(x) {b_part}"
+
+                elif kind == 'exp':
+                    mask = y > 0
+                    if mask.sum() < 2:
+                        return formula, None
+                    b, log_a = np.polyfit(x[mask], np.log(y[mask]), 1)
+                    A = np.exp(log_a)
+                    y_pred = A * np.exp(b * x)
+                    formula = f"y = {A:.4g}·e^({b:.4g}x)"
+
+                elif kind == 'power':
+                    mask = (x > 0) & (y > 0)
+                    if mask.sum() < 2:
+                        return formula, None
+                    b, log_a = np.polyfit(np.log(x[mask]), np.log(y[mask]), 1)
+                    A = np.exp(log_a)
+                    y_pred = np.where(x > 0, A * np.power(np.where(x > 0, x, 1), b), np.nan)
+                    formula = f"y = {A:.4g}·x^{b:.4g}"
+
+                elif kind == 'lowess':
+                    try:
+                        from statsmodels.nonparametric.smoothers_lowess import lowess
+                        frac = float(param) if param is not None else 0.3
+                        y_pred = lowess(y, x, frac=frac, return_sorted=True)[:, 1]
+                    except ImportError:
+                        return formula, None
+
+                elif kind == 'spline':
+                    from scipy.interpolate import UnivariateSpline
+                    k = max(1, min(5, int(param) if param else 3))
+                    ux, uidx = np.unique(x, return_index=True)
+                    if len(ux) < k + 1:
+                        return formula, None
+                    y_pred = UnivariateSpline(ux, y[uidx], k=k)(x)
+
+                elif kind == 'ma':
+                    window = int(param) if param else max(3, len(x) // 20)
+                    window = max(2, min(window, len(x)))
+                    y_pred = pd.Series(y).rolling(window=window, center=True, min_periods=1).mean().to_numpy()
+
+                if y_pred is not None:
+                    valid = ~(np.isnan(y) | np.isnan(y_pred))
+                    y_v, yp_v = y[valid], y_pred[valid]
+                    if len(y_v) >= 2:
+                        ss_res = np.sum((y_v - yp_v) ** 2)
+                        ss_tot = np.sum((y_v - np.mean(y_v)) ** 2)
+                        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+                        return formula, {
+                            'n':    int(valid.sum()),
+                            'r2':   r2,
+                            'rmse': float(np.sqrt(np.mean((y_v - yp_v) ** 2))),
+                            'mae':  float(np.mean(np.abs(y_v - yp_v))),
+                        }
+
+            except Exception:
+                pass
+
+            return formula, None
+
+        lx, ly = self.last_x, self.last_y
+        x_col = lx[0] if isinstance(lx, list) else lx
+        y_col = ly[0] if isinstance(ly, list) else ly
+
+        result = {}
+        for ds in (self.uset if uset_slice is None or uset_slice == 'all'
+                   else self._get_uset_slice(uset_slice)):
+            raw = ds.reg_order
+            kind, param = _parse_reg_spec(raw)
+            label = KIND_LABELS.get(kind, lambda p: str(kind))(param) if kind is not None else None
+            formula, stats = _fit_regression(kind, param, ds, x_col, y_col, label)
+            result[ds.index] = {'raw': raw, 'kind': kind, 'param': param, 'label': label, 'formula': formula, 'stats': stats}
+
+        any_reg = any(v['kind'] is not None for v in result.values())
+        for idx, info in result.items():
+            ds = self.uset[idx]
+            reg_str = info['label'] or "None"
+            formula_str = f"  →  {info['formula']}" if info['formula'] else ""
+            print(f"Set {idx} ({ds.title}): {reg_str}{formula_str}")
+            if info['stats']:
+                s = info['stats']
+                r2_str = f"R²={s['r2']:.4f}" if s['r2'] is not None else "R²=N/A"
+                print(f"   {r2_str}   RMSE={s['rmse']:.4g}   MAE={s['mae']:.4g}   n={s['n']}")
+
+        if not any_reg:
+            print("No regression functions are currently set.")
+
+        return result
 
     def set_display_parms(self, uset_slice, parms):
         """
@@ -1848,42 +2309,67 @@ class UnichartNotebook:
         print(f"Plot theme set to: {mode} Mode")
 
     # ------------------------------------------------------------------
-    # Analysis (Ported from GUI)
+    # Analysis
     # ------------------------------------------------------------------
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", "")):
         """
         Creates a new dataset representing the difference between study and base.
+        Returns the list of newly created delta Datasets.
         """
         if align_on is None: align_on = self.last_x
         if delta_parms is None: delta_parms = [self.last_y] if isinstance(self.last_y, str) else self.last_y
-        
-        # Ensure list format
         if not isinstance(delta_parms, list): delta_parms = [delta_parms]
-        
+
+        if not (0 <= base_idx < len(self.uset)):
+            raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.uset)} datasets).")
+
         base_ds = self.uset[base_idx]
+
+        if align_on not in base_ds.df.columns:
+            raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
+
         targets = self._get_uset_slice(study_indices)
-        
         lsuffix, rsuffix = suffixes
-        
+        created = []
+
         for study_ds in targets:
-            df_base = base_ds.df[[align_on] + delta_parms].sort_values(align_on)
-            df_study = study_ds.df[[align_on] + delta_parms].sort_values(align_on)
-            
+            if align_on not in study_ds.df.columns:
+                print(f"Warning: skipping '{study_ds.title}' — align_on column '{align_on}' not found.")
+                continue
+
+            valid_parms = [p for p in delta_parms if p in base_ds.df.columns and p in study_ds.df.columns]
+            skipped = set(delta_parms) - set(valid_parms)
+            if skipped:
+                print(f"Warning: skipping columns not present in both datasets: {sorted(skipped)}")
+            if not valid_parms:
+                print(f"Warning: skipping '{study_ds.title}' — no valid delta columns found.")
+                continue
+
+            df_base = base_ds.df[[align_on] + valid_parms].sort_values(align_on)
+            df_study = study_ds.df[[align_on] + valid_parms].sort_values(align_on)
+
             merged = pd.merge_asof(df_base, df_study, on=align_on, suffixes=suffixes, direction='nearest')
-            
-            for parm in delta_parms:
+
+            result = merged[[align_on]].copy()
+            for parm in valid_parms:
                 b_col = f"{parm}{lsuffix}"
                 s_col = f"{parm}{rsuffix}"
-                merged[f"DL_{parm}"] = merged[s_col] - merged[b_col]
-                # Avoid div by zero
-                merged[f"DLPCT_{parm}"] = np.where(merged[b_col] == 0, np.nan, 100 * (merged[f"DL_{parm}"] / merged[b_col]))
-            
-            # Create new dataset
+                result[f"DL_{parm}"] = merged[s_col] - merged[b_col]
+                result[f"DLPCT_{parm}"] = np.where(
+                    merged[b_col] == 0, np.nan,
+                    100 * (result[f"DL_{parm}"] / merged[b_col])
+                )
+
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
-            self.load_df(merged, title=new_title)
-            
-            # Tag it
-            self.uset[-1].settype = 'delta'
+            next_index = len(self.uset)
+            ds = Dataset(result, index=next_index, title=new_title)
+            ds.settype = 'delta'
+            self.uset.append(ds)
+            print(f"Loaded Set {next_index}: {new_title}")
+            created.append(ds)
+
+        self._refresh_widgets()
+        return created
 
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
@@ -1891,283 +2377,487 @@ class UnichartNotebook:
     def line(self, column, level, color='red', dash='dash'):
         """Add a vertical or horizontal line to the next plot."""
         if level == 'clear':
-            self.lines.pop(column, None)
+            if column == 'all':
+                self.lines.clear()
+            else:
+                self.lines.pop(column, None)
             return
         
         if column not in self.lines: self.lines[column] = []
-        self.lines[column].append({'level': level, 'color': color, 'dash': dash})
+        plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
+        self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
     def highlight(self, column, range_tuple, color='yellow', opacity=0.2):
         """Add a highlighted region to the next plot."""
         if range_tuple == 'clear':
-            self.highlights.pop(column, None)
+            if column == 'all':
+                self.highlights.clear()
+            else:
+                self.highlights.pop(column, None)
             return
             
         if column not in self.highlights: self.highlights[column] = []
         self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
         
     def scale(self, column, range_tuple):
-            """
-            Set specific axis limits for a parameter.
-            
-            Parameters:
-            -----------
-            column : str
-                The name of the column (parameter) to constrain.
-            range_tuple : tuple, list, or 'clear'
-                The (min, max) range for the axis. 
-                Pass 'clear' or None to remove the restriction.
-                
-            Example:
-            --------
-            UC.scale('pressure', (900, 1100))
-            """
-            if range_tuple == 'clear' or range_tuple is None:
-                if column in self.axis_limits:
-                    del self.axis_limits[column]
-                    print(f"Limits cleared for '{column}'.")
+        """
+        Set specific axis limits for a parameter.
+        """
+        if range_tuple == 'clear' or range_tuple is None:
+            if column in self.axis_limits:
+                del self.axis_limits[column]
+                print(f"Limits cleared for '{column}'.")
+        else:
+            if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
+                self.axis_limits[column] = range_tuple
+                print(f"Limits set for '{column}': {range_tuple}")
             else:
-                if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
-                    self.axis_limits[column] = range_tuple
-                    print(f"Limits set for '{column}': {range_tuple}")
-                else:
-                    raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
+                raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
+
     # ------------------------------------------------------------------
     # Font Management
     # ------------------------------------------------------------------
-    def set_font_sizes(self, suptitle=None, legend=None, axes_title=None, axes_tick=None):
-        """Set independent font sizes for various plot elements."""
-        if suptitle is not None: self.suptitle_size = suptitle
-        if legend is not None: self.legend_size = legend
-        if axes_title is not None: self.axes_title_size = axes_title
-        if axes_tick is not None: self.axes_tick_size = axes_tick
+    def set_font_sizes(self, suptitle=None, legend=None, axes_title=None,
+                    axes_tick=None, subplot_title=None, colorbar=None,
+                    hover=None, all=None, reset=False):
+        """
+        Configure font sizes for plot elements. Settings persist across plots.
+        """
+        keys = ('suptitle_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
+                'subplot_title_size', 'colorbar_size', 'hover_size')
+
+        if reset:
+            for k in keys:
+                setattr(self, k, None)
+            return
+
+        def _validate(name, value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                resolved = FONT_SIZE_MAP.get(value.lower())
+                if resolved is None:
+                    valid = ', '.join(sorted(FONT_SIZE_MAP))
+                    raise ValueError(f"{name}: unknown size name '{value}'. Valid names: {valid}")
+                value = resolved
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric or a size name, got {type(value).__name__}")
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}")
+            if value > 72:
+                warnings.warn(f"{name}={value} is unusually large for a font size.")
+            return float(value)
+
+        base = _validate('all', all)
+        resolved = {
+            'suptitle_size':      _validate('suptitle', suptitle)           if suptitle      is not None else base,
+            'legend_size':        _validate('legend', legend)               if legend        is not None else base,
+            'axes_title_size':    _validate('axes_title', axes_title)       if axes_title    is not None else base,
+            'axes_tick_size':     _validate('axes_tick', axes_tick)         if axes_tick     is not None else base,
+            'subplot_title_size': _validate('subplot_title', subplot_title) if subplot_title is not None else base,
+            'colorbar_size':      _validate('colorbar', colorbar)           if colorbar      is not None else base,
+            'hover_size':         _validate('hover', hover)                 if hover         is not None else base,
+        }
+        for k, v in resolved.items():
+            if v is not None:
+                setattr(self, k, v)
+
+
+    def get_font_sizes(self):
+        """Return a dict of currently configured font sizes (None = unset/default)."""
+        return {
+            'suptitle':       self.suptitle_size,
+            'legend':         self.legend_size,
+            'axes_title':     self.axes_title_size,
+            'axes_tick':      self.axes_tick_size,
+            'subplot_title':  getattr(self, 'subplot_title_size', None),
+            'colorbar':       getattr(self, 'colorbar_size', None),
+            'hover':          getattr(self, 'hover_size', None),
+        }
 
     def _apply_fonts(self, fig):
-        """Internal method to apply stored font sizes to a Plotly figure."""
-        if fig is None: return fig
-        
+        """Apply stored font sizes to a Plotly figure."""
+        if fig is None:
+            return fig
+
         layout_updates = {}
-        if self.suptitle_size:
+        if self.suptitle_size is not None:
             layout_updates['title_font'] = dict(size=self.suptitle_size)
-        if self.legend_size:
+        if self.legend_size is not None:
             layout_updates['legend'] = dict(font=dict(size=self.legend_size))
-        
+        if getattr(self, 'hover_size', None) is not None:
+            layout_updates['hoverlabel'] = dict(font=dict(size=self.hover_size))
         if layout_updates:
             fig.update_layout(**layout_updates)
-            
+
+        sp_size = getattr(self, 'subplot_title_size', None)
+        if sp_size is not None and fig.layout.annotations:
+            for ann in fig.layout.annotations:
+                ann.font = dict(size=sp_size)
+
         x_updates, y_updates = {}, {}
-        if self.axes_title_size:
+        if self.axes_title_size is not None:
             x_updates['title_font'] = dict(size=self.axes_title_size)
             y_updates['title_font'] = dict(size=self.axes_title_size)
-        if self.axes_tick_size:
+        if self.axes_tick_size is not None:
             x_updates['tickfont'] = dict(size=self.axes_tick_size)
             y_updates['tickfont'] = dict(size=self.axes_tick_size)
-            
-        if x_updates: fig.update_xaxes(**x_updates)
-        if y_updates: fig.update_yaxes(**y_updates)
-        
+        if x_updates:
+            fig.update_xaxes(**x_updates)
+        if y_updates:
+            fig.update_yaxes(**y_updates)
+
+        cb_size = getattr(self, 'colorbar_size', None)
+        if cb_size is not None:
+            for trace in fig.data:
+                cb = getattr(trace, 'colorbar', None)
+                if cb is not None:
+                    cb.tickfont = dict(size=cb_size)
+                    if cb.title is not None:
+                        try:
+                            cb.title.font = dict(size=cb_size)
+                        except (AttributeError, ValueError):
+                            cb.title = dict(text=str(cb.title), font=dict(size=cb_size))
+
         return fig
+
     # ------------------------------------------------------------------
     # Main Plot Function
     # ------------------------------------------------------------------
     def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None, 
                 subplot_titles=None, suptitle=None, suppress_legends=False, **kwargs):
-            """
-            Main plotting wrapper.
+        """
+        Main plotting wrapper.
+
+        Parameters:
+        -----------
+        by : str, optional
+            'vars'    (default) - Subplot per Y variable.
+            'sets' / 'datasets' - Subplot per Dataset.
+            'ymult'           - Single plot, multiple Y axes (delegates to plot_ymult).
+        """
+        # Delegate to the multi-y wrapper if requested
+        if by == 'ymult':
+            return self.plot_ymult(x=x, y=y, suptitle=suptitle,
+                                     figsize=figsize,
+                                     suppress_legends=suppress_legends)
+
+        self._clear_last_fig()
+
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x = x
+        self.last_y = y
+
+        if ncols is None and nrows is None:
+            if self.last_ncols is not None or self.last_nrows is not None:
+                ncols, nrows = self.last_ncols, self.last_nrows
+        self.last_ncols = ncols
+        self.last_nrows = nrows
+
+        if by == 'sets' or by == 'datasets':
+            fig = uniplot_per_dataset(
+                list_of_datasets=self.uset,
+                x=x,
+                y=y,
+                display_parms=self.display_parms,
+                suptitle=suptitle or self.suptitle,
+                figsize=figsize,
+                ncols=ncols,
+                nrows=nrows,
+                darkmode=self.darkmode,
+                x_lim=self.axis_limits.get(x) if isinstance(x, str) else None,
+                y_lim=None,
+                axis_limits=self.axis_limits, 
+                return_axes=True 
+            )
+            mode = 'sets'
             
-            Parameters:
-            -----------
-            by : str, optional
-                'vars' (default) - Creates a subplot for each Y variable.
-                                Best for comparing multiple datasets on specific metrics.
-                'sets'           - Creates a subplot for each Dataset.
-                                Best for looking at all metrics for a specific dataset.
-            """
-            if x is None: x = self.last_x
-            if y is None: y = self.last_y
-            self.last_x = x
-            self.last_y = y
+        else:
+            plot_args = {
+                'list_of_datasets': self.uset,
+                'x': x,
+                'y': y,
+                'darkmode': self.darkmode,
+                'display_parms': self.display_parms,
+                'suptitle': suptitle or self.suptitle,
+                'xlabel': self.x_label,
+                'ylabel': self.y_label,
+                'subplot_titles': subplot_titles,
+                'return_axes': True,
+                'figsize': figsize,
+                'ncols': ncols,
+                'nrows': nrows,
+                'axis_limits': self.axis_limits,
+            }
+            plot_args.update(kwargs)
+            fig = uniplot(**plot_args)
+            mode = 'vars'
 
-            # Sync persistent dimensions
-            if ncols is None and nrows is None:
-                if self.last_ncols is not None or self.last_nrows is not None:
-                    ncols, nrows = self.last_ncols, self.last_nrows
-            self.last_ncols = ncols
-            self.last_nrows = nrows
+        if fig is None: return
 
-            if by == 'sets' or by == 'datasets':
-                fig = uniplot_per_dataset(
-                    list_of_datasets=self.uset,
-                    x=x,
-                    y=y,
-                    display_parms=self.display_parms,
-                    suptitle=suptitle or self.suptitle,
-                    figsize=figsize,
-                    ncols=ncols,
-                    nrows=nrows,
-                    darkmode=self.darkmode,
-                    x_lim=self.axis_limits.get(x),
-                    y_lim=None, 
-                    axis_limits=self.axis_limits, 
-                    return_axes=True 
-                )
-                mode = 'sets'
-                
-            else:
-                plot_args = {
-                    'list_of_datasets': self.uset,
-                    'x': x, 
-                    'y': y,
-                    'darkmode': self.darkmode,
-                    'display_parms': self.display_parms,
-                    'suptitle': suptitle or self.suptitle,
-                    'xlabel': self.x_label,      
-                    'ylabel': self.y_label, 
-                    'subplot_titles': subplot_titles,
-                    'return_axes': True,
-                    'figsize': figsize,
-                    'ncols': ncols,
-                    'nrows': nrows,
-                }
-                plot_args.update(kwargs)
-                fig = uniplot(**plot_args)
-                mode = 'vars'
+        x_list = x if isinstance(x, list) else [x]
+        y_list = y if isinstance(y, list) else [y]
+        active_sets = [d for d in self.uset if d.select]
 
-            if fig is None: return
+        if len(x_list) == len(y_list):
+            plot_pairs = list(zip(x_list, y_list))
+        elif len(x_list) == 1:
+            plot_pairs = [(x_list[0], yi) for yi in y_list]
+        elif len(y_list) == 1:
+            plot_pairs = [(xi, y_list[0]) for xi in x_list]
+        else:
+            plot_pairs = [(x_list[0], yi) for yi in y_list]
 
-            # Calculate grid dimensions to know where to place lines/highlights
-            y_list = y if isinstance(y, list) else [y]
-            active_sets = [d for d in self.uset if d.select]
-            
-            if mode == 'vars':
-                n_items = len(y_list)
-            else:
-                n_items = len(active_sets)
+        if mode == 'vars':
+            n_items = len(plot_pairs)
+        else:
+            n_items = len(active_sets)
 
-            # Standard grid calc used by both plotters
-            if ncols is None and nrows is None:
-                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
-            elif ncols is None:
-                calc_ncols = int(np.ceil(n_items / nrows))
-            else:
-                calc_ncols = ncols
-            calc_ncols = max(1, calc_ncols)
+        if ncols is None and nrows is None:
+            calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
+        elif ncols is None:
+            calc_ncols = int(np.ceil(n_items / nrows))
+        else:
+            calc_ncols = ncols
+        calc_ncols = max(1, calc_ncols)
 
-            # Decoration Helper
-            def apply_to_all_subplots(func, **kwargs):
-                for i in range(n_items):
-                    r = (i // calc_ncols) + 1
-                    c = (i % calc_ncols) + 1
-                    func(row=r, col=c, **kwargs)
+        fig = self._apply_decorations(
+            fig, x_list, y_list, mode, calc_ncols,
+            plot_pairs if mode == 'vars' else None
+        )
 
-            # --- LINES ---
-            for col_name, lines in self.lines.items():
-                if col_name == x:
-                    # Vertical lines on X axis apply to everyone
-                    for l in lines:
-                        fig.add_vline(x=l['level'], line_dash=l['dash'], line_color=l['color'])
-                elif col_name in y_list:
-                    # Horizontal lines differ based on mode
-                    if mode == 'vars':
-                        # Only apply to the specific subplot for this variable
-                        for idx, yi in enumerate(y_list):
-                            if yi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                for l in lines:
-                                    fig.add_hline(y=l['level'], line_dash=l['dash'], line_color=l['color'], row=r, col=c)
-                    else: # mode == 'sets'
-                        # Variable exists on ALL subplots
-                        for l in lines:
-                            apply_to_all_subplots(fig.add_hline, y=l['level'], line_dash=l['dash'], line_color=l['color'])
+        if mode == 'vars':
+            for idx, (xi, yi) in enumerate(plot_pairs):
+                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                if xi in self.axis_limits:
+                    fig.update_xaxes(range=self.axis_limits[xi], row=r, col=c)
+                if yi in self.axis_limits:
+                    fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-            # --- HIGHLIGHTS ---
-            for col_name, hls in self.highlights.items():
-                if col_name == x:
-                    for h in hls:
-                        fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'], 
-                                    opacity=h['opacity'], layer="below", line_width=0)
-                elif col_name in y_list:
-                    if mode == 'vars':
-                        for idx, yi in enumerate(y_list):
-                            if yi == col_name:
-                                r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                                for h in hls:
-                                    fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'], 
-                                                opacity=h['opacity'], layer="below", line_width=0, row=r, col=c)
-                    else: # mode == 'sets'
-                        for h in hls:
-                            apply_to_all_subplots(fig.add_hrect, y0=h['range'][0], y1=h['range'][1], 
-                                                fillcolor=h['color'], opacity=h['opacity'], layer="below", line_width=0)
+        fig = self._apply_fonts(fig)
+        if fig and suppress_legends:
+            fig.update_traces(visible='legendonly') 
+        self.last_fig = fig
+        return fig
 
-            # X limits
-            if x in self.axis_limits:
-                fig.update_xaxes(range=self.axis_limits[x])
+    # ------------------------------------------------------------------
+    # NEW: Multi-Y plot wrapper
+    # ------------------------------------------------------------------
+    def plot_ymult(self, x=None, y=None, suptitle=None, figsize=(12, 8),
+                     legend='above', legend_group_by='sets', suppress_legends=False):
+        """
+        Single plot, multiple Y-axes. All selected datasets overlay on the
+        same x-axis. Each y variable gets its own y-axis (left, right, then
+        stacking further right).
 
-            # Y limits
-            # In 'sets' mode, limits were already applied inside uniplot_per_dataset.
-            if mode == 'vars':
-                for idx, yi in enumerate(y_list):
-                    if yi in self.axis_limits:
-                        r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
-                        fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+        Honors:
+            - self.variable_formats   (overrides dataset formatting per-attr)
+            - self.axis_limits        (per-column ranges, applied to the matching axis)
+            - self.darkmode, self.suptitle, self.display_parms, self.x_label
+            - self.lines, self.highlights (decorations applied per axis)
 
-            fig = self._apply_fonts(fig)
-            if fig and suppress_legends:
-                fig.update_traces(visible='legendonly') 
-            self.last_fig = fig
-            return fig
+        Notes
+        -----
+        Per-attribute precedence is used: a value set in
+        `self.variable_formats[var]` for a given attribute wins; otherwise
+        the matching dataset attribute is used. So you can, for example,
+        set linestyle on the variable while letting color come from each
+        dataset.
+        """
+        self._clear_last_fig()
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
 
+        y_list = y if isinstance(y, list) else [y]
+
+        fig = uniplot_ymultaxis(
+            list_of_datasets=self.uset,
+            x=x, y=y_list,
+            variable_formats=self.variable_formats,
+            display_parms=self.display_parms,
+            suptitle=suptitle or self.suptitle,
+            xlabel=self.x_label,
+            darkmode=self.darkmode,
+            figsize=figsize,
+            x_lim=self.axis_limits.get(x) if isinstance(x, str) else None,
+            axis_limits=self.axis_limits,
+            legend=legend,
+            legend_group_by=legend_group_by,
+            return_axes=True,
+        )
+        if fig is None:
+            return None
+
+        # Apply line/highlight decorations using the y_list → axis map.
+        # Vertical lines on x span all axes; horizontal lines on a y-var
+        # are drawn on the y-axis assigned to that variable.
+        yref_for = {yi: ('y' if i == 0 else f'y{i+1}') for i, yi in enumerate(y_list)}
+
+        for col, lines in self.lines.items():
+            if col == x:
+                for l in lines:
+                    fig.add_vline(x=l['level'],
+                                  line_dash=l['dash'] or 'solid',
+                                  line_color=l['color'])
+            elif col in yref_for:
+                yref = yref_for[col]
+                for l in lines:
+                    fig.add_shape(type='line', x0=0, x1=1,
+                                  y0=l['level'], y1=l['level'],
+                                  xref='paper', yref=yref,
+                                  line=dict(color=l['color'], dash=l['dash'] or 'solid'))
+
+        for col, hls in self.highlights.items():
+            if col == x:
+                for h in hls:
+                    fig.add_vrect(x0=h['range'][0], x1=h['range'][1],
+                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  layer='below', line_width=0)
+            elif col in yref_for:
+                yref = yref_for[col]
+                for h in hls:
+                    fig.add_shape(type='rect', x0=0, x1=1,
+                                  y0=h['range'][0], y1=h['range'][1],
+                                  xref='paper', yref=yref,
+                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  layer='below', line_width=0)
+
+        fig = self._apply_fonts(fig)
+        if suppress_legends:
+            fig.update_traces(visible='legendonly')
+        self.last_fig = fig
+        return fig
 
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-
     def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-            """
-            Unified interface for Bar Charts.
-            """
-            if x is None: x = self.last_x
-            if y is None: y = self.last_y
-            self.last_x, self.last_y = x, y
+        """
+        Unified interface for Bar Charts.
+        """
+        self._clear_last_fig()
 
-            y_list = y if isinstance(y, list) else [y]
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
 
-            # --- 1. DISPATCH BLOCK ---
-            if by == 'dataset_x':
-                fig = unibar_datasets_as_x(
-                    list_of_datasets=self.uset, y=y_list, agg=agg,
-                    suptitle=self.suptitle, figsize=figsize, 
-                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
-                )
-                # dataset_x handles its own axis limits internally, so we return early
-                if fig:
-                    fig = self._apply_fonts(fig)
-                    if suppress_legends:
-                        fig.update_traces(visible='legendonly')
-                    self.last_fig = fig
-                return fig
-                
-            elif by in ['sets', 'datasets']:
-                fig = unibar_per_dataset(
-                    list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
-                    suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, return_axes=True 
-                )
-            else:
-                fig = unibar(
-                    list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
-                    suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, return_axes=True 
-                )
-                
-            # --- 2. APPLY LIMITS (Only for original vars/sets modes) ---
+        y_list = y if isinstance(y, list) else [y]
+
+        if by == 'dataset_x':
+            fig = unibar_datasets_as_x(
+                list_of_datasets=self.uset, y=y_list, agg=agg,
+                suptitle=self.suptitle, figsize=figsize, 
+                darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+            )
             if fig:
-                if x in self.axis_limits:
-                    fig.update_xaxes(range=self.axis_limits[x])
+                fig = self._apply_decorations(fig, [], y_list, 'global', 1)
+                fig = self._apply_fonts(fig)
+                if suppress_legends:
+                    fig.update_traces(visible='legendonly')
+                self.last_fig = fig
+            return fig
+            
+        elif by in ['sets', 'datasets']:
+            fig = unibar_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, return_axes=True 
+            )
+        else:
+            fig = unibar(
+                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, return_axes=True 
+            )
+            
+        if fig:
+            if x in self.axis_limits:
+                fig.update_xaxes(range=self.axis_limits[x])
 
+            active_sets = [d for d in self.uset if d.select]
+            n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
+            
+            calc_ncols = ncols
+            if calc_ncols is None and nrows is None:
+                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
+            elif calc_ncols is None:
+                calc_ncols = int(np.ceil(n_items / nrows))
+            calc_ncols = max(1, calc_ncols)
+
+            if by in ['sets', 'datasets']:
+                primary_y = y_list[0]
+                if primary_y in self.axis_limits:
+                    fig.update_yaxes(range=self.axis_limits[primary_y])
+            else:
+                for idx, yi in enumerate(y_list):
+                    if yi in self.axis_limits:
+                        r = (idx // calc_ncols) + 1
+                        c = (idx % calc_ncols) + 1
+                        fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+
+            dec_mode = 'sets' if by in ['sets', 'datasets'] else 'vars'
+            dec_items = [(x, yi) for yi in y_list] if dec_mode == 'vars' else None
+            fig = self._apply_decorations(fig, [], y_list, dec_mode, calc_ncols, dec_items)
+
+            fig = self._apply_fonts(fig)
+            if suppress_legends:
+                fig.update_traces(visible='legendonly')
+            self.last_fig = fig
+            
+        return fig
+
+    # ------------------------------------------------------------------
+    # The box Command
+    # ------------------------------------------------------------------
+    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
+                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+        """
+        Unified interface for Box Plots.
+        """
+        self._clear_last_fig()
+
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        self.last_x, self.last_y = x, y
+
+        y_list = y if isinstance(y, list) else [y]
+
+        if by == 'dataset_x':
+            fig = unibox_datasets_as_x(
+                list_of_datasets=self.uset, y=y_list, boxmode=boxmode,
+                points=points, notched=notched, suptitle=suptitle or self.suptitle,
+                figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+            )
+            if fig:
+                fig = self._apply_decorations(fig, [], y_list, 'global', 1)
+                fig = self._apply_fonts(fig)
+                if suppress_legends:
+                    fig.update_traces(visible='legendonly')
+                self.last_fig = fig
+            return fig
+
+        elif by in ['sets', 'datasets']:
+            primary_y = y_list[0]
+            y_limit = self.axis_limits.get(primary_y)
+            fig = unibox_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                points=points, notched=notched,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=y_limit, return_axes=True
+            )
+        else:
+            fig = unibox(
+                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                points=points, notched=notched, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, y_lim=None, return_axes=True
+            )
+            
+            if fig:
                 active_sets = [d for d in self.uset if d.select]
-                n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
-                
+                n_items = len(y_list)
                 calc_ncols = ncols
                 if calc_ncols is None and nrows is None:
                     calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
@@ -2175,228 +2865,155 @@ class UnichartNotebook:
                     calc_ncols = int(np.ceil(n_items / nrows))
                 calc_ncols = max(1, calc_ncols)
 
-                if by in ['sets', 'datasets']:
-                    primary_y = y_list[0]
-                    if primary_y in self.axis_limits:
-                        fig.update_yaxes(range=self.axis_limits[primary_y])
-                else:
-                    for idx, yi in enumerate(y_list):
-                        if yi in self.axis_limits:
-                            r = (idx // calc_ncols) + 1
-                            c = (idx % calc_ncols) + 1
-                            fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+                for idx, yi in enumerate(y_list):
+                    if yi in self.axis_limits:
+                        r = (idx // calc_ncols) + 1
+                        c = (idx % calc_ncols) + 1
+                        fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-                # --- 3. FINAL POLISH ---
-                fig = self._apply_fonts(fig)
-                if suppress_legends:
-                    fig.update_traces(visible='legendonly')
-                self.last_fig = fig
-                
-            # Ensure we return the figure object so fig1.show() works!
-            return fig
-
-    # ------------------------------------------------------------------
-    # The box Command
-    # ------------------------------------------------------------------
-
-    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
-                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-            """
-            Unified interface for Box Plots.
-            """
-            if x is None: x = self.last_x
-            if y is None: y = self.last_y
-            self.last_x, self.last_y = x, y
-
-            y_list = y if isinstance(y, list) else [y]
-
-            # --- 1. DISPATCH BLOCK ---
-            if by == 'dataset_x':
-                fig = unibox_datasets_as_x(
-                    list_of_datasets=self.uset, y=y_list, boxmode=boxmode, 
-                    points=points, notched=notched, suptitle=suptitle or self.suptitle, 
-                    figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
-                )
-                if fig:
-                    fig = self._apply_fonts(fig)
-                    if suppress_legends:
-                        fig.update_traces(visible='legendonly')
-                    self.last_fig = fig
-                return fig
-
-            elif by in ['sets', 'datasets']:
-                # Resolve limits if they exist for the primary Y
-                primary_y = y_list[0]
-                y_limit = self.axis_limits.get(primary_y)
-                fig = unibox_per_dataset(
-                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
-                    points=points, notched=notched,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, y_lim=y_limit, return_axes=True
-                )
+        if fig:
+            if x in self.axis_limits:
+                fig.update_xaxes(range=self.axis_limits[x])
+            if by in ['sets', 'datasets']:
+                fig = self._apply_decorations(fig, [], y_list, 'sets', 1)
             else:
-                # vars mode limits are handled inside unibox
-                fig = unibox(
-                    list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
-                    points=points, notched=notched, color=color,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, y_lim=None, return_axes=True
+                _n = len(y_list)
+                _nc = ncols if ncols is not None else (
+                    int(np.ceil(_n / nrows)) if nrows is not None
+                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
                 )
-                
-                # Apply limits for vars mode
-                if fig:
-                    active_sets = [d for d in self.uset if d.select]
-                    n_items = len(y_list)
-                    calc_ncols = ncols
-                    if calc_ncols is None and nrows is None:
-                        calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
-                    elif calc_ncols is None:
-                        calc_ncols = int(np.ceil(n_items / nrows))
-                    calc_ncols = max(1, calc_ncols)
+                _nc = max(1, _nc)
+                fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
+                                              [(x, yi) for yi in y_list])
+            fig = self._apply_fonts(fig)
+            if suppress_legends:
+                fig.update_traces(visible='legendonly')
+            self.last_fig = fig
 
-                    for idx, yi in enumerate(y_list):
-                        if yi in self.axis_limits:
-                            r = (idx // calc_ncols) + 1
-                            c = (idx % calc_ncols) + 1
-                            fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
+        return fig
 
-            if fig:
-                if x in self.axis_limits:
-                    fig.update_xaxes(range=self.axis_limits[x])
-                fig = self._apply_fonts(fig)
-                if suppress_legends:
-                    fig.update_traces(visible='legendonly')
-                self.last_fig = fig
-                
-            return fig               
-        # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
     def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None, 
                     bin_size=None, bin_start=None, bin_end=None,
                     histnorm='', barmode='overlay', opacity=0.7,
                     color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-            """
-            Unified interface for Histograms.
-            
-            Parameters:
-            -----------
-            x : str or list
-                The column(s) to distribute (the bins).
-            y : str, optional
-                The column to use for weighting the histogram (e.g., time spent).
-            histfunc : str, optional
-                The aggregation function for 'y' (default is 'sum'). Can be 'count', 'sum', 'avg', 'min', 'max'.
-            nbins : int, optional
-                Target number of bins. Plotly will attempt to create approximately this many.
-            bin_size : float, optional
-                Forces the exact width of each bin.
-            bin_start : float, optional
-                Forces the starting value of the first bin.
-            bin_end : float, optional
-                Forces the ending value of the last bin.
-            by : str
-                'vars' (default) - Subplots by variable (compare datasets).
-                'sets'           - Subplots by dataset (compare variables).
-            histnorm : str
-                '' (default, count), 'percent', 'probability', 'density', 'probability density'
-            """
-            if x is None: x = self.last_x
-            self.last_x = x
-            
-            limit = None
-            if isinstance(x, str):
-                limit = self.axis_limits.get(x)
-            elif isinstance(x, list) and len(x) == 1:
-                limit = self.axis_limits.get(x[0])
+        """
+        Unified interface for Histograms.
+        """
+        self._clear_last_fig()
 
+        if x is None: x = self.last_x
+        self.last_x = x
+        
+        limit = None
+        if isinstance(x, str):
+            limit = self.axis_limits.get(x)
+        elif isinstance(x, list) and len(x) == 1:
+            limit = self.axis_limits.get(x[0])
+
+        x_list = x if isinstance(x, list) else [x]
+
+        if by in ['sets', 'datasets']:
+            fig = unihistogram_by_dataset(
+                list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
+                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
+            )
+            if fig:
+                fig = self._apply_decorations(fig, x_list, [], 'sets', 1)
+        else:
+            fig = unihistogram(
+                list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
+                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, x_lim=limit, return_axes=True
+            )
+            if fig:
+                _n = len(x_list)
+                _nc = ncols if ncols is not None else (
+                    int(np.ceil(_n / nrows)) if nrows is not None
+                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
+                )
+                _nc = max(1, _nc)
+                fig = self._apply_decorations(fig, x_list, [], 'vars', _nc,
+                                              [(xi, None) for xi in x_list])
+
+        fig = self._apply_fonts(fig)
+        if fig and suppress_legends:
+            fig.update_traces(visible='legendonly')
+        self.last_fig = fig
+        return fig
+        
+    # ------------------------------------------------------------------
+    # The contour Command
+    # ------------------------------------------------------------------
+    def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
+                    colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
+                    ncontours=None,
+                    suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+        """
+        Unified interface for Contour Plots.
+        """
+        self._clear_last_fig()
+
+        if x is None: x = self.last_x
+        if y is None: y = self.last_y
+        if z is None: z = getattr(self, 'last_z', None) 
+        
+        self.last_x, self.last_y, self.last_z = x, y, z
+
+        if z is None:
+            print("Error: Contour plots require a 'z' variable to map to color.")
+            return
+
+        limit_x = self.axis_limits.get(x)
+        limit_y = self.axis_limits.get(y)
+
+        if by in ['sets', 'datasets']:
+            fig = unicontour_per_dataset(
+                list_of_datasets=self.uset, x=x, y=y, z=z, 
+                contours_coloring=contours_coloring, colorscale=colorscale,
+                interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                ncontours=ncontours,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+            )
+        else:
+            fig = unicontour(
+                list_of_datasets=self.uset, x=x, y=y, z=z,
+                contours_coloring=contours_coloring, colorscale=colorscale,
+                interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
+                ncontours=ncontours,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
+            )
+            
+        if fig:
+            z_list = z if isinstance(z, list) else [z]
             if by in ['sets', 'datasets']:
-                fig = unihistogram_by_dataset(
-                    list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
-                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
-                    histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, x_lim=limit, return_axes=True
-                )
+                fig = self._apply_decorations(fig, [x], [y], 'sets', 1)
             else:
-                fig = unihistogram(
-                    list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
-                    bin_size=bin_size, bin_start=bin_start, bin_end=bin_end, 
-                    histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                    darkmode=self.darkmode, x_lim=limit, return_axes=True
+                _n = len(z_list)
+                _nc = ncols if ncols is not None else (
+                    int(np.ceil(_n / nrows)) if nrows is not None
+                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
                 )
-                
+                _nc = max(1, _nc)
+                fig = self._apply_decorations(fig, [x], [y], 'vars', _nc,
+                                              [(x, y) for _ in z_list])
             fig = self._apply_fonts(fig)
-            if fig and suppress_legends:
+            if limit_x: fig.update_xaxes(range=limit_x)
+            if limit_y: fig.update_yaxes(range=limit_y)
+            if suppress_legends:
                 fig.update_traces(visible='legendonly')
             self.last_fig = fig
-            return fig
-        
-    def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
-                colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
-                ncontours=None,
-                suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
-            """
-            Unified interface for Contour Plots.
-            
-            Parameters:
-            -----------
-            x : str
-                The X-axis variable (e.g., 'Mach')
-            y : str
-                The Y-axis variable (e.g., 'Altitude')
-            z : str or list
-                The variable(s) to color the contour by (e.g., 'T4F')
-            by : str
-                'vars' (default) - Subplots by Z-variable.
-                'sets'           - Subplots by dataset.
-            interpolate : bool
-                If True, uses scipy.griddata to mesh scattered x/y points.
-            interp_res : int
-                The resolution of the interpolation grid (default 100x100).
-            suptitle : str, optional
-                A title for the entire figure.
-            """
-            if x is None: x = self.last_x
-            if y is None: y = self.last_y
-            self.last_x, self.last_y = x, y
 
-            if z is None:
-                print("Error: Contour plots require a 'z' variable to map to color.")
-                return
-
-            limit_x = self.axis_limits.get(x)
-            limit_y = self.axis_limits.get(y)
-
-            if by in ['sets', 'datasets']:
-                fig = unicontour_per_dataset(
-                    list_of_datasets=self.uset, x=x, y=y, z=z, 
-                    contours_coloring=contours_coloring, colorscale=colorscale,
-                    interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                    ncontours=ncontours,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
-                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
-                )
-            else:
-                fig = unicontour(
-                    list_of_datasets=self.uset, x=x, y=y, z=z,
-                    contours_coloring=contours_coloring, colorscale=colorscale,
-                    interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                    ncontours=ncontours,
-                    suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
-                    darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
-                )
-                
-            if fig:
-                if limit_x: fig.update_xaxes(range=limit_x)
-                if limit_y: fig.update_yaxes(range=limit_y)
-                fig = self._apply_fonts(fig)
-                if suppress_legends:
-                    fig.update_traces(visible='legendonly')
-                self.last_fig = fig
-                
-            return fig
+        return fig
 
     # ------------------------------------------------------------------
     # The table Command
@@ -2404,42 +3021,29 @@ class UnichartNotebook:
     def table(self, cols=None, title=None):
         """
         Display a Plotly Table of specific columns from selected datasets.
-        
-        Parameters:
-        -----------
-        cols : str or list, optional
-            The columns to display.
-            If None, defaults to [self.last_x] + [self.last_y].
-        title : str, optional
-            Title for the table layout.
         """
-        # 1. Resolve Columns
         if cols is None:
             if self.last_x is None or self.last_y is None:
                 print("No columns specified and no previous plot variables defined.")
                 return
             
-            # Construct list from last_x and last_y (which might be a list or str)
             y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
             target_cols = [self.last_x] + y_part
         else:
             target_cols = cols if isinstance(cols, list) else [cols]
 
-        # 2. Aggregate Data from Selected Datasets
         combined_dfs = []
         
         for ds in self.uset:
             if not ds.select:
                 continue
             
-            # Filter for existing columns only
             valid_cols = [c for c in target_cols if c in ds.df.columns]
             
             if not valid_cols:
                 continue
                 
-            subset = ds.df[valid_cols].copy()
-            # Add a source column to identify the dataset
+            subset = ds.df[valid_cols]
             subset.insert(0, 'Dataset', ds.title)
             combined_dfs.append(subset)
 
@@ -2448,11 +3052,8 @@ class UnichartNotebook:
             return
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
-        
-        # Fill NaNs for display purposes (optional, but looks better in tables)
         final_df = final_df.fillna('-')
 
-        # 3. Define Styling based on Darkmode
         if self.darkmode:
             header_color = 'rgb(30, 30, 30)'
             cell_color = 'rgb(50, 50, 50)'
@@ -2464,7 +3065,6 @@ class UnichartNotebook:
             font_color = 'black'
             line_color = 'rgb(200, 200, 200)'
 
-        # 4. Create Plotly Table
         fig = go.Figure(data=[go.Table(
             header=dict(
                 values=list(final_df.columns),
@@ -2483,7 +3083,6 @@ class UnichartNotebook:
             )
         )])
 
-        # Layout updates
         layout_args = {
             'title': {'text': title or "Data Table", 'x': 0.5},
             'template': "plotly_dark" if self.darkmode else "plotly_white",
@@ -2501,8 +3100,12 @@ class UnichartNotebook:
             return
 
         try:
+            import plotly.io as pio
+            pio.defaults.mathjax = None 
+
             self.last_fig.write_image(filename, scale=scale, width=width, height=height)
             print(f"Plot saved to {filename}")
+
         except ValueError as e:
             print(f"Error saving image (ensure 'kaleido' is installed): {e}")
         except Exception as e:
@@ -2510,19 +3113,12 @@ class UnichartNotebook:
 
     def list_sets(self):
         """
-        Print a formatted table of all loaded datasets, including:
-        - Set index and title
-        - Whether selected (✓/✗)
-        - DataFrame shape (rows, columns)
-        - Whether a query is applied (if non-None and non-empty)
-
-        The table is printed using standard console formatting (monospace-friendly).
+        Print a formatted table of all loaded datasets.
         """
         if not self.uset:
             print("No datasets loaded.")
             return
 
-        # Prepare rows for tabular output
         rows = []
         for ds in self.uset:
             selected = "✓" if ds.select else "X"
@@ -2536,19 +3132,15 @@ class UnichartNotebook:
                 query_info
             ])
 
-        # Column names and widths
         headers = ["Set", "Title", "Selected", "Shape", "Query?" ]
-        # Calculate column widths (with padding)
         col_widths = [
             max(len(row[i]) for row in [headers] + rows) + 2
             for i in range(len(headers))
         ]
 
-        # Format header and separator
         header_str = "".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
         sep = "-" * sum(col_widths)
 
-        # Build output
         output_lines = [header_str, sep]
         for row in rows:
             line = "".join(str(val).ljust(col_widths[i]) for i, val in enumerate(row))
@@ -2558,178 +3150,146 @@ class UnichartNotebook:
         print("\n".join(output_lines))
 
     def list_parms(self, set_number=None, search_string=None, use_regex=False):
-            """
-            List the parameters (columns) available in the loaded datasets.
-            Includes descriptions if available in self.parm_description_dict.
-            
-            Parameters:
-            -----------
-            set_number : int, list, 'all', or None, optional
-                The specific dataset index to inspect.
-            search_string : str, optional
-                A substring or wildcard to filter the parameter names.
-            use_regex : bool, optional
-                If True, treats the search_string as a strict regular expression.
-                
-            Returns:
-            --------
-            list
-                A sorted list of matching parameter (column) names.
-            """
-            import fnmatch
-            
-            if set_number is None:
-                target_sets = self.selected()
-                if not target_sets:
-                    target_sets = self.uset
-            else:
-                target_sets = self._get_uset_slice(set_number)
-                
+        """
+        List the parameters (columns) available in the loaded datasets.
+        """
+        import fnmatch
+        
+        if set_number is None:
+            target_sets = self.selected()
             if not target_sets:
-                print("No datasets available to list parameters from.")
-                return []
-                
-            all_cols = set()
-            for ds in target_sets:
-                all_cols.update(ds.df.columns)
-                
-            if search_string:
-                try:
-                    if not use_regex:
-                        if not any(c in search_string for c in ['*', '?', '[', ']']):
-                            search_string = f"*{search_string}*"
-                        pattern_str = fnmatch.translate(search_string)
-                    else:
-                        pattern_str = search_string
-                        
-                    pattern = re.compile(pattern_str, re.IGNORECASE)
-                    filtered_cols = [col for col in all_cols if pattern.search(str(col))]
-                    
-                except re.error as e:
-                    print(f"Invalid search pattern '{search_string}': {e}")
-                    return []
-            else:
-                filtered_cols = list(all_cols)
-                
-            filtered_cols.sort(key=lambda x: str(x).lower())
+                target_sets = self.uset
+        else:
+            target_sets = self._get_uset_slice(set_number)
             
-            print(f"Found {len(filtered_cols)} parameters", end="")
-            if search_string:
-                print(f" matching '{search_string}'", end="")
-            if set_number is not None:
-                print(f" in set(s) {set_number}:")
-            else:
-                print(" in active datasets:")
+        if not target_sets:
+            print("No datasets available to list parameters from.")
+            return []
+            
+        all_cols = set()
+        for ds in target_sets:
+            all_cols.update(ds.df.columns)
+            
+        if search_string:
+            try:
+                if not use_regex:
+                    if not any(c in search_string for c in ['*', '?', '[', ']']):
+                        search_string = f"*{search_string}*"
+                    pattern_str = fnmatch.translate(search_string)
+                else:
+                    pattern_str = search_string
+                    
+                pattern = re.compile(pattern_str, re.IGNORECASE)
+                filtered_cols = [col for col in all_cols if pattern.search(str(col))]
                 
-            # --- MODIFIED OUTPUT LOGIC ---
-            for col in filtered_cols:
-                desc = self.parm_description_dict.get(col, "No description available.")
-                print(f"  - {str(col).ljust(25)} : {desc}")
-                
-            return filtered_cols
+            except re.error as e:
+                print(f"Invalid search pattern '{search_string}': {e}")
+                return []
+        else:
+            filtered_cols = list(all_cols)
+            
+        filtered_cols.sort(key=lambda x: str(x).lower())
+        
+        print(f"Found {len(filtered_cols)} parameters", end="")
+        if search_string:
+            print(f" matching '{search_string}'", end="")
+        if set_number is not None:
+            print(f" in set(s) {set_number}:")
+        else:
+            print(" in active datasets:")
+            
+        for col in filtered_cols:
+            desc = self.parm_description_dict.get(col, "No description available.")
+            print(f"  - {str(col).ljust(25)} : {desc}")
+            
+        return filtered_cols
 
     def summary(self, cols=None):
-            """
-            Print a formatted statistical summary table for specific columns
-            across all selected datasets, noting any applied queries.
+        """
+        Print a formatted statistical summary table.
+        """
+        if cols is None:
+            y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
+            x_part = [self.last_x] if self.last_x else []
+            target_cols = x_part + y_part
+        else:
+            target_cols = cols if isinstance(cols, list) else [cols]
 
-            Parameters:
-            -----------
-            cols : str or list, optional
-                The columns to summarize. If None, defaults to the last plotted x and y variables.
-            """
-            # 1. Resolve Columns
-            if cols is None:
-                y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
-                x_part = [self.last_x] if self.last_x else []
-                target_cols = x_part + y_part
+        if not target_cols:
+            print("No columns specified and no previous plot variables defined.")
+            return
+
+        active_ds = self.selected()
+        if not active_ds:
+            print("No datasets selected. Cannot generate summary.")
+            return
+
+        rows = []
+        for ds in active_ds:
+            if ds.query:
+                q_str = str(ds.query)
+                query_disp = (q_str[:27] + '...') if len(q_str) > 30 else q_str
             else:
-                target_cols = cols if isinstance(cols, list) else [cols]
+                query_disp = "-"
 
-            if not target_cols:
-                print("No columns specified and no previous plot variables defined.")
-                return
-
-            active_ds = self.selected()
-            if not active_ds:
-                print("No datasets selected. Cannot generate summary.")
-                return
-
-            # 2. Gather Data
-            rows = []
-            for ds in active_ds:
-                # Format the query string for display
-                if ds.query:
-                    q_str = str(ds.query)
-                    query_disp = (q_str[:27] + '...') if len(q_str) > 30 else q_str
-                else:
-                    query_disp = "-"
-
-                for col in target_cols:
-                    if col in ds.df.columns:
-                        data = ds.df[col].dropna()
+            for col in target_cols:
+                if col in ds.df.columns:
+                    data = ds.df[col].dropna()
+                    
+                    if data.empty:
+                        rows.append([
+                            f"Set {ds.index}", str(ds.title)[:20], query_disp, 
+                            str(col)[:15], "0", "-", "-", "-", "-"
+                        ])
+                    elif pd.api.types.is_numeric_dtype(data):
+                        count = len(data)
+                        vmin = data.min()
+                        vmean = data.mean()
+                        vmax = data.max()
+                        vstd = data.std()
                         
-                        if data.empty:
-                            rows.append([
-                                f"Set {ds.index}", str(ds.title)[:20], query_disp, 
-                                str(col)[:15], "0", "-", "-", "-", "-"
-                            ])
-                        elif pd.api.types.is_numeric_dtype(data):
-                            count = len(data)
-                            vmin = data.min()
-                            vmean = data.mean()
-                            vmax = data.max()
-                            vstd = data.std()
-                            
-                            rows.append([
-                                f"Set {ds.index}",
-                                str(ds.title)[:20],
-                                query_disp,
-                                str(col)[:15],
-                                f"{count}",
-                                f"{vmin:.4g}",
-                                f"{vmean:.4g}",
-                                f"{vmax:.4g}",
-                                f"{vstd:.4g}" if pd.notna(vstd) else "-"
-                            ])
-                        else:
-                            rows.append([
-                                f"Set {ds.index}", str(ds.title)[:20], query_disp, 
-                                str(col)[:15], f"{len(data)}", "Non-numeric", "-", "-", "-"
-                            ])
+                        rows.append([
+                            f"Set {ds.index}",
+                            str(ds.title)[:20],
+                            query_disp,
+                            str(col)[:15],
+                            f"{count}",
+                            f"{vmin:.4g}",
+                            f"{vmean:.4g}",
+                            f"{vmax:.4g}",
+                            f"{vstd:.4g}" if pd.notna(vstd) else "-"
+                        ])
+                    else:
+                        rows.append([
+                            f"Set {ds.index}", str(ds.title)[:20], query_disp, 
+                            str(col)[:15], f"{len(data)}", "Non-numeric", "-", "-", "-"
+                        ])
 
-            if not rows:
-                print(f"None of the selected datasets contain the specified columns: {target_cols}")
-                return
+        if not rows:
+            print(f"None of the selected datasets contain the specified columns: {target_cols}")
+            return
 
-            # 3. Format and Print Table
-            headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
-            
-            # Calculate column widths with 2 spaces padding
-            col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + rows))]
+        headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
+        
+        col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + rows))]
 
-            header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
-            sep = "-" * sum(col_widths)
+        header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
+        sep = "-" * sum(col_widths)
 
-            print(f"\nStatistical Summary for: {', '.join(target_cols)}")
-            print(header_str)
-            print(sep)
-            for row in rows:
-                print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
+        print(f"\nStatistical Summary for: {', '.join(target_cols)}")
+        print(header_str)
+        print(sep)
+        for row in rows:
+            print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
 
     def help(self):
         """
-        Display help information for the UnichartNotebook class:
-        - Class docstring
-        - Public methods and their signatures/descriptions
-        - Public attributes (non-callable properties) with their types and values (if not too long)
-        - Example usage tips
+        Display help information for the UnichartNotebook class.
         """
         print("=" * 70)
         print("📚 UnichartNotebook HELP")
         print("=" * 70)
         
-        # 1. Class docstring
         cls = self.__class__
         if cls.__doc__:
             print("\n📋 CLASS DESCRIPTION:")
@@ -2737,7 +3297,6 @@ class UnichartNotebook:
         else:
             print("\n⚠️  No class docstring found.")
 
-        # 2. Public methods (exclude dunder & private unless overridden)
         methods = inspect.getmembers(cls, predicate=inspect.isfunction)
         public_methods = [m for m in methods if not m[0].startswith('_') or m[0] in ['__init__', '__repr__']]
 
@@ -2746,36 +3305,35 @@ class UnichartNotebook:
         for name, func in public_methods:
             sig = inspect.signature(func)
             doc = inspect.getdoc(func) or "No description available."
-            # Shorten doc to first line for brevity + show full in next block if needed
             doc_preview = doc.split('\n')[0] if doc else ""
             print(f"• {name}{sig}")
             print(f"  → {doc_preview}")
             print()
         
-        # 3. Public attributes (instance variables set in __init__)
         print("🛠️  PUBLIC ATTRIBUTES (Instance):")
         print("-" * 70)
         attrs = []
         for attr, value in self.__dict__.items():
-            if not attr.startswith('_'):  # skip private/internal
+            if not attr.startswith('_'):
                 attrs.append((attr, value))
 
         if not attrs:
             print("No public instance attributes found.")
         else:
             for name, val in sorted(attrs):
-                val_str = str(val)[:100]  # truncate long reprs
+                val_str = str(val)[:100]
                 if len(str(val)) > 100:
                     val_str += "..."
                 print(f"• {name}: {type(val).__name__} = {val_str}")
 
-        # 4. Tips / Quick Start
         print("\n💡 QUICK START TIPS:")
         print("-" * 70)
-        print("1. Load data:      nb.load_df(df, title='MyData')")
+        print("1. Load data:       nb.load_df(df, title='MyData')")
         print("2. Select datasets: nb.select([0, 1])")
-        print("3. Plot:           nb.plot(x='time', y='value')")
-        print("4. View help:      nb.help()")
+        print("3. Plot:            nb.plot(x='time', y='value')")
+        print("4. Multi-Y plot:    nb.plot_ymult(x='time', y=['Temp', 'Pressure'])")
+        print("5. Variable format: nb.var_format('Temp', linestyle='--')")
+        print("6. View help:       nb.help()")
         print("\nSee method signatures above for full parameters.")
 
         print("\n" + "=" * 70)
@@ -2783,38 +3341,145 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Interactive "GUI" Replacement
     # ------------------------------------------------------------------
+    def _clear_last_fig(self):
+        """
+        Actively hollows out the massive JSON payload of the previous Plotly figure
+        before dropping the reference. This prevents rapid RAM inflation (high-water marks)
+        during tight plotting loops.
+        """
+        if self.last_fig is not None:
+            self.last_fig.data = []
+            self.last_fig.layout = {}
+            self.last_fig = None
+
+    def _apply_decorations(self, fig, x_vars, y_vars, mode, calc_ncols, plot_items=None):
+        """
+        Apply stored lines and highlights to a figure.
+        """
+        x_list = x_vars if isinstance(x_vars, list) else ([x_vars] if x_vars else [])
+        y_list = y_vars if isinstance(y_vars, list) else ([y_vars] if y_vars else [])
+
+        for col_name, col_lines in self.lines.items():
+            if col_name in x_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if xi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for l in col_lines:
+                                fig.add_shape(
+                                    type='line', x0=l['level'], x1=l['level'], y0=0, y1=1,
+                                    xref=xref, yref=f'{yref} domain',
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                )
+                else:
+                    for l in col_lines:
+                        fig.add_vline(x=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+
+            if col_name in y_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for l in col_lines:
+                                fig.add_shape(
+                                    type='line', x0=0, x1=1, y0=l['level'], y1=l['level'],
+                                    xref=f'{xref} domain', yref=yref,
+                                    line=dict(color=l['color'], dash=l['dash'] or 'solid')
+                                )
+                else:
+                    for l in col_lines:
+                        fig.add_hline(y=l['level'], line_dash=l['dash'] or 'solid', line_color=l['color'])
+
+        for col_name, hls in self.highlights.items():
+            if col_name in x_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if xi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for h in hls:
+                                fig.add_shape(
+                                    type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
+                                    xref=xref, yref=f'{yref} domain',
+                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                )
+                else:
+                    for h in hls:
+                        fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
+                                      opacity=h['opacity'], layer='below', line_width=0)
+
+            if col_name in y_list:
+                if mode == 'vars' and plot_items:
+                    for idx, (xi, yi) in enumerate(plot_items):
+                        if yi == col_name:
+                            r, c = (idx // calc_ncols) + 1, (idx % calc_ncols) + 1
+                            xref, yref = _subplot_refs(r, c, calc_ncols)
+                            for h in hls:
+                                fig.add_shape(
+                                    type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
+                                    xref=f'{xref} domain', yref=yref,
+                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                )
+                else:
+                    for h in hls:
+                        fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
+                                      opacity=h['opacity'], layer='below', line_width=0)
+
+        return fig
+
     def _refresh_widgets(self):
-        """Rebuilds the dataset management widget list."""
+        """
+        Rebuilds the dataset management widget list, cleanly destroying 
+        old widgets to prevent memory leaks in the kernel and the browser.
+        """
+        if hasattr(self, 'dataset_widget_container') and self.dataset_widget_container.children:
+            for child in self.dataset_widget_container.children:
+                if hasattr(child, 'children'):
+                    for sub_child in child.children:
+                        sub_child.close()
+                child.close()
+                
         items = []
-        
-        # Header
         items.append(widgets.HTML("<b>Dataset Manager</b>"))
         
+        def update_select(change, dataset):
+            dataset.select = change['new']
+
+        def update_color(change, dataset):
+            dataset.color = change['new']
+
         for i, ds in enumerate(self.uset):
-            # Checkbox for Selection
-            chk = widgets.Checkbox(value=ds.select, description=f"{i}: {ds.title}", indent=False, layout=widgets.Layout(width='300px'))
             
-            # Observe changes to update dataset object immediately
-            def on_change(change, dataset=ds):
-                dataset.select = change['new']
-            chk.observe(on_change, names='value')
+            chk = widgets.Checkbox(
+                value=ds.select, 
+                description=f"{i}: {ds.title}", 
+                indent=False, 
+                layout=widgets.Layout(width='300px')
+            )
             
-            # Metadata display
-            details = widgets.Label(value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", layout=widgets.Layout(width='200px'))
+            chk.observe(functools.partial(update_select, dataset=ds), names='value')
             
-            # Color Picker
-            # Try to convert mpl color/plotly color to hex for widget
-            # Simple fallback to white if unknown format
-            cp = widgets.ColorPicker(concise=True, value='blue', layout=widgets.Layout(width='30px'))
+            details = widgets.Label(
+                value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", 
+                layout=widgets.Layout(width='200px')
+            )
             
-            def on_color_change(change, dataset=ds):
-                dataset.color = change['new']
-            cp.observe(on_color_change, names='value')
+            current_color = ds.color if isinstance(ds.color, str) else 'blue'
+            cp = widgets.ColorPicker(
+                concise=True, 
+                value=current_color, 
+                layout=widgets.Layout(width='30px')
+            )
+            
+            cp.observe(functools.partial(update_color, dataset=ds), names='value')
 
             row = widgets.HBox([chk, cp, details])
             items.append(row)
             
         self.dataset_widget_container.children = tuple(items)
+        
 
     def gui(self):
         """Displays the interactive dataset manager widgets."""

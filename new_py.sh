@@ -4,11 +4,11 @@
 date_str=$(date +"%y%m%d")
 
 # Get the current notebook name
-current_notebook=/home/tje/Documents/GitHub/new_notebook_template/template_notebook.ipynb
+current_notebook=/home/tom/Documents/GitHub/toms_utils/template_notebook.ipynb
 
 # Set the target directory
-default_dir="/home/tje/Documents/misc_projects/python_notebooks"
-workspace_file="/home/tje/Documents/GitHub/new_notebook_template/linux_profile.code-workspace"
+default_dir="/home/tom/Documents/misc_projects/python_notebooks"
+workspace_file="/home/tom/Documents/GitHub/toms_utils/linux_profile.code-workspace"
 
 working_dir=$default_dir
 
@@ -38,7 +38,16 @@ cp "$current_notebook" "$filename"
 sed -i "s|%DATE%|$date_str|g" "$filename"
 sed -i "s|%WORKING_DIRECTORY%|$working_dir|g" "$filename"
 
-code $workspace_file
-code "$filename"
+# 1. Use '&' to run these in the background so the script doesn't wait for you to close VS Code
+# 2. We launch the workspace first, then the file
+flatpak run com.visualstudio.code "$workspace_file" & 
 
-exec kill -9 $PPID
+# Small sleep to ensure the workspace loads before the file command hits
+sleep 1 
+
+flatpak run com.visualstudio.code "$filename" &
+
+# 3. Exit the script naturally. 
+# If you are running this from a terminal, the terminal will return to the prompt.
+# If you are running this via a Desktop Shortcut/Launcher, the window will close.
+exit 0
