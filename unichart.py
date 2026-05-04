@@ -45,6 +45,8 @@ FONT_SIZE_MAP = {
     'xlarge': 18,
     'xxl':    24,
     '2xl':    24,
+    'xxxl':   28,
+    '3xl':    28,
     'huge':   32,
 }
 
