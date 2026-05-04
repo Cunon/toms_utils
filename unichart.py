@@ -1553,7 +1553,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                         suptitle=None, xlabel=None,
                         darkmode=False, figsize=(12, 8),
                         x_lim=None, axis_limits=None,
-                        legend='right', return_axes=False):
+                        legend='right', legend_group_by='sets', return_axes=False):
     """
     Single-plot, multi-Y-axis scatter/line chart.
 
@@ -1662,10 +1662,10 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
             fig.add_trace(go.Scatter(
                 x=df[x], y=df[yi],
                 mode=mode,
-                name=yi,
+                name=f"{ds.index}: {ds.title}" if legend_group_by == 'vars' else yi,
                 yaxis=y_axis_name,
-                legendgroup=f"set_{ds.index}",
-                legendgrouptitle_text=f"{ds.index}: {ds.title}",
+                legendgroup=f"var_{yi}" if legend_group_by == 'vars' else f"set_{ds.index}",
+                legendgrouptitle_text=yi if legend_group_by == 'vars' else f"{ds.index}: {ds.title}",
                 marker=dict(
                     size=fmt['markersize'],
                     symbol=get_plotly_marker(fmt['marker']),
@@ -2643,7 +2643,7 @@ class UnichartNotebook:
     # NEW: Multi-Y plot wrapper
     # ------------------------------------------------------------------
     def plot_ymult(self, x=None, y=None, suptitle=None, figsize=(12, 8),
-                     legend='above', suppress_legends=False):
+                     legend='above', legend_group_by='sets', suppress_legends=False):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the
         same x-axis. Each y variable gets its own y-axis (left, right, then
@@ -2682,6 +2682,7 @@ class UnichartNotebook:
             x_lim=self.axis_limits.get(x) if isinstance(x, str) else None,
             axis_limits=self.axis_limits,
             legend=legend,
+            legend_group_by=legend_group_by,
             return_axes=True,
         )
         if fig is None:
