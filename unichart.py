@@ -63,10 +63,7 @@ def get_plotly_linestyle(mpl_style):
     return LINESTYLE_MAP_MPL_TO_PLOTLY.get(mpl_style, 'solid')
 
 def validate_color(value):
-    """
-    Validate if the provided value is a valid color (Hex, RGB, or standard string).
-    Plotly is permissive, so we mostly check for string validity.
-    """
+    """Return True if value is a string (Plotly accepts named colors, hex, and rgb strings)."""
     if not isinstance(value, str):
         return False
     return True
@@ -191,10 +188,7 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
 # -----------------------------------------------------------------------------
 
 class Dataset:
-    """
-    A class to represent a dataset and manage its plotting attributes.
-    Refactored to be renderer-agnostic but maintains original API.
-    """
+    """Stores a DataFrame and the visual/formatting attributes used when plotting it."""
 
     def __init__(self, df, index=0, title=None, display_parms=None):
         self._df_full = df
@@ -401,9 +395,7 @@ class Dataset:
 # -----------------------------------------------------------------------------
 
 def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', bounds_error=False):
-    """
-    Perform interpolation on a table. Kept identical to source for API compatibility.
-    """
+    """1D interpolation on a sorted DataFrame column."""
     if x_col not in df.columns or y_col not in df.columns:
         raise ValueError(f"Columns '{x_col}' and '{y_col}' must be present in the DataFrame.")
 
@@ -1548,7 +1540,7 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
 
 
 # -----------------------------------------------------------------------------
-# NEW: Multi-Y-Axis Scatter/Line Plot
+# Multi-Y-Axis Scatter/Line Plot
 # -----------------------------------------------------------------------------
 def uniplot_ymultaxis(list_of_datasets, x, y,
                         variable_formats=None, display_parms=None,
@@ -1624,7 +1616,6 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
             fmt = _resolve_var_format(ds, yi, variable_formats)
 
-            # Slice down to only the columns we need (dedup-safe)
             req_cols = list(dict.fromkeys([x, yi] + valid_hover))
             df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
 
@@ -1636,7 +1627,6 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
             else:
                 df = df.sort_index()
 
-            # Mode: lines if linestyle set, markers if marker set; default markers
             parts = []
             if fmt['linestyle']:
                 parts.append('lines')
@@ -1644,7 +1634,6 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 parts.append('markers')
             mode = '+'.join(parts) if parts else 'markers'
 
-            # Hover
             ht = (f"<b>Set {ds.index}: {ds.title}</b><br>"
                   f"<b>{yi}</b><br>"
                   f"{x}: %{{x:.4g}}<br>"
@@ -1684,7 +1673,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 hovertemplate=ht,
             ))
 
-    # Configure each y-axis (color only applied when explicitly set via variable_formats)
+    # Color axes only when explicitly set via variable_formats; otherwise use Plotly's default
     for idx_y, yi in enumerate(y_list):
         ax_color = axis_label_colors[yi]
         title_kw = dict(text=yi)
@@ -1706,7 +1695,6 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
             ax.update(dict(overlaying='y', side='right', anchor='free', position=pos))
             fig.update_layout({f"yaxis{idx_y + 1}": ax})
 
-    # Layout
     layout_extras = dict(
         showlegend=(legend != 'off'),
         xaxis=dict(domain=[0, x_domain_end], title=xlabel or x),
@@ -1732,10 +1720,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
 class UnichartNotebook:
     def __init__(self):
-        """
-        Initialize the Notebook-based UniChart environment.
-        """
-        self.uset = []
+        self.sets = []
         self.dataset_widget_container = widgets.VBox([])
         
         # State Memory
@@ -1777,12 +1762,21 @@ class UnichartNotebook:
         print("UniChart Notebook Environment Initialized.")
 
     # ------------------------------------------------------------------
+    # Backwards compatibility
+    # ------------------------------------------------------------------
+    @property
+    def uset(self):
+        return self.sets
+
+    @uset.setter
+    def uset(self, value):
+        self.sets = value
+
+    # ------------------------------------------------------------------
     # Data Management
     # ------------------------------------------------------------------
     def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
-        """
-        Load a DataFrame into the environment as datasets.
-        """
+        """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one."""
         if not title:
             if set_name_column and set_name_column in df.columns:
                 pass
@@ -1801,7 +1795,7 @@ class UnichartNotebook:
             else:
                 df["SETNUMBER"] = df.index
 
-        next_index = len(self.uset)
+        next_index = len(self.sets)
         
         if set_idx_column and set_idx_column in df.columns:
             for set_index, df_subset in df.groupby(set_idx_column):
@@ -1816,12 +1810,12 @@ class UnichartNotebook:
                     final_title = f"Group {set_index}"
 
                 ds = Dataset(df_subset.copy(), index=next_index, title=final_title)
-                self.uset.append(ds)
+                self.sets.append(ds)
                 print(f"Loaded Set {next_index}: {ds.title}")
                 next_index += 1
         else:
             ds = Dataset(df.copy(), index=next_index, title=title if title else "Untitled")
-            self.uset.append(ds)
+            self.sets.append(ds)
             print(f"Loaded Set {next_index}: {ds.title}")
 
         if load_cols_as_vars:
@@ -1842,7 +1836,7 @@ class UnichartNotebook:
             print(f"Error reading clipboard: {e}")
 
     def clear_data(self):
-        self.uset = []
+        self.sets = []
         self._refresh_widgets()
         print("All datasets cleared.")
 
@@ -1859,7 +1853,7 @@ class UnichartNotebook:
     # Selection & Filtering
     # ------------------------------------------------------------------
     def _get_uset_slice(self, uset_slice):
-        """Helper to normalize input into a list of datasets.
+        """Normalize a selector into a list of Dataset objects.
 
         Accepts:
             None | 'all'    -> all datasets
@@ -1867,22 +1861,21 @@ class UnichartNotebook:
             str             -> dataset(s) whose title matches exactly
             Dataset         -> wrapped in a list
             list            -> mixed list of any of the above
-        Unknown items are silently skipped (no string accidentally treated
-        as a Dataset).
+        Unknown inputs print a warning and return [].
         """
         if uset_slice is None or uset_slice == 'all':
-            return list(self.uset)
+            return list(self.sets)
 
         if isinstance(uset_slice, Dataset):
             return [uset_slice]
 
         if isinstance(uset_slice, int) and not isinstance(uset_slice, bool):
-            if 0 <= uset_slice < len(self.uset):
-                return [self.uset[uset_slice]]
+            if 0 <= uset_slice < len(self.sets):
+                return [self.sets[uset_slice]]
             return []
 
         if isinstance(uset_slice, str):
-            matches = [d for d in self.uset if d.title == uset_slice]
+            matches = [d for d in self.sets if d.title == uset_slice]
             if not matches:
                 print(f"Warning: no dataset with title {uset_slice!r}.")
             return matches
@@ -1902,14 +1895,14 @@ class UnichartNotebook:
 
     def select(self, uset_slice=None):
         """Select the specified dataset(s)."""
-        for ds in self.uset: ds.select = False
+        for ds in self.sets: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
         self._refresh_widgets()
 
     def selected(self):
         """Get the currently selected datasets."""
-        return [ds for ds in self.uset if ds.select]
+        return [ds for ds in self.sets if ds.select]
 
     def omit(self, uset_slice=None):
         for ds in self._get_uset_slice(uset_slice):
@@ -1917,7 +1910,7 @@ class UnichartNotebook:
         self._refresh_widgets()
 
     def restore(self, uset_slice=None):
-        targets = self.uset if uset_slice == "all" else self._get_uset_slice(uset_slice)
+        targets = self.sets if uset_slice == "all" else self._get_uset_slice(uset_slice)
         for ds in targets:
             ds.select = True
         self._refresh_widgets()
@@ -2013,10 +2006,7 @@ class UnichartNotebook:
             ds.reg_order = order
 
     # ------------------------------------------------------------------
-    # NEW: Variable-level formatting overrides
-    # (These take precedence over Dataset attributes when using
-    #  plot_ymult() or uniplot_ymultaxis(). Per-attribute precedence:
-    #  variable_formats wins, otherwise the dataset attribute wins.)
+    # Variable-level formatting overrides
     # ------------------------------------------------------------------
     def var_format(self, variable, color=None, marker=None, linestyle=None,
                    markersize=None, linewidth=None, alpha=None):
@@ -2102,7 +2092,7 @@ class UnichartNotebook:
         default_colors = px.colors.qualitative.Plotly
 
         if sets:
-            targets = (self.uset if uset_slice is None
+            targets = (self.sets if uset_slice is None
                        else self._get_uset_slice(uset_slice))
             for ds in targets:
                 ds._color     = default_colors[ds.index % len(default_colors)]
@@ -2145,9 +2135,7 @@ class UnichartNotebook:
         print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
 
     def reg_info(self, uset_slice=None):
-        """
-        Return the parsed regression spec for the specified dataset(s).
-        """
+        """Print the regression type, equation, and fit stats (R², RMSE, MAE) for each dataset."""
         KIND_LABELS = {
             'poly':   lambda p: "Linear (degree 1)" if p == 1 else f"Polynomial (degree {p})",
             'log':    lambda p: "Logarithmic",
@@ -2261,7 +2249,7 @@ class UnichartNotebook:
         y_col = ly[0] if isinstance(ly, list) else ly
 
         result = {}
-        for ds in (self.uset if uset_slice is None or uset_slice == 'all'
+        for ds in (self.sets if uset_slice is None or uset_slice == 'all'
                    else self._get_uset_slice(uset_slice)):
             raw = ds.reg_order
             kind, param = _parse_reg_spec(raw)
@@ -2271,7 +2259,7 @@ class UnichartNotebook:
 
         any_reg = any(v['kind'] is not None for v in result.values())
         for idx, info in result.items():
-            ds = self.uset[idx]
+            ds = self.sets[idx]
             reg_str = info['label'] or "None"
             formula_str = f"  →  {info['formula']}" if info['formula'] else ""
             print(f"Set {idx} ({ds.title}): {reg_str}{formula_str}")
@@ -2312,18 +2300,15 @@ class UnichartNotebook:
     # Analysis
     # ------------------------------------------------------------------
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", "")):
-        """
-        Creates a new dataset representing the difference between study and base.
-        Returns the list of newly created delta Datasets.
-        """
+        """Compute delta (absolute and %) between each study dataset and the base, and load the results."""
         if align_on is None: align_on = self.last_x
         if delta_parms is None: delta_parms = [self.last_y] if isinstance(self.last_y, str) else self.last_y
         if not isinstance(delta_parms, list): delta_parms = [delta_parms]
 
-        if not (0 <= base_idx < len(self.uset)):
-            raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.uset)} datasets).")
+        if not (0 <= base_idx < len(self.sets)):
+            raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.sets)} datasets).")
 
-        base_ds = self.uset[base_idx]
+        base_ds = self.sets[base_idx]
 
         if align_on not in base_ds.df.columns:
             raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
@@ -2361,10 +2346,10 @@ class UnichartNotebook:
                 )
 
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
-            next_index = len(self.uset)
+            next_index = len(self.sets)
             ds = Dataset(result, index=next_index, title=new_title)
             ds.settype = 'delta'
-            self.uset.append(ds)
+            self.sets.append(ds)
             print(f"Loaded Set {next_index}: {new_title}")
             created.append(ds)
 
@@ -2557,7 +2542,7 @@ class UnichartNotebook:
 
         if by == 'sets' or by == 'datasets':
             fig = uniplot_per_dataset(
-                list_of_datasets=self.uset,
+                list_of_datasets=self.sets,
                 x=x,
                 y=y,
                 display_parms=self.display_parms,
@@ -2575,7 +2560,7 @@ class UnichartNotebook:
             
         else:
             plot_args = {
-                'list_of_datasets': self.uset,
+                'list_of_datasets': self.sets,
                 'x': x,
                 'y': y,
                 'darkmode': self.darkmode,
@@ -2598,7 +2583,7 @@ class UnichartNotebook:
 
         x_list = x if isinstance(x, list) else [x]
         y_list = y if isinstance(y, list) else [y]
-        active_sets = [d for d in self.uset if d.select]
+        active_sets = [d for d in self.sets if d.select]
 
         if len(x_list) == len(y_list):
             plot_pairs = list(zip(x_list, y_list))
@@ -2642,28 +2627,13 @@ class UnichartNotebook:
         return fig
 
     # ------------------------------------------------------------------
-    # NEW: Multi-Y plot wrapper
+    # Multi-Y plot wrapper
     # ------------------------------------------------------------------
     def plot_ymult(self, x=None, y=None, suptitle=None, figsize=(12, 8),
                      legend='above', legend_group_by='sets', suppress_legends=False):
         """
-        Single plot, multiple Y-axes. All selected datasets overlay on the
-        same x-axis. Each y variable gets its own y-axis (left, right, then
-        stacking further right).
-
-        Honors:
-            - self.variable_formats   (overrides dataset formatting per-attr)
-            - self.axis_limits        (per-column ranges, applied to the matching axis)
-            - self.darkmode, self.suptitle, self.display_parms, self.x_label
-            - self.lines, self.highlights (decorations applied per axis)
-
-        Notes
-        -----
-        Per-attribute precedence is used: a value set in
-        `self.variable_formats[var]` for a given attribute wins; otherwise
-        the matching dataset attribute is used. So you can, for example,
-        set linestyle on the variable while letting color come from each
-        dataset.
+        Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
+        Applies all notebook-level formatting: axis_limits, variable_formats, lines, highlights.
         """
         self._clear_last_fig()
         if x is None: x = self.last_x
@@ -2673,7 +2643,7 @@ class UnichartNotebook:
         y_list = y if isinstance(y, list) else [y]
 
         fig = uniplot_ymultaxis(
-            list_of_datasets=self.uset,
+            list_of_datasets=self.sets,
             x=x, y=y_list,
             variable_formats=self.variable_formats,
             display_parms=self.display_parms,
@@ -2747,7 +2717,7 @@ class UnichartNotebook:
 
         if by == 'dataset_x':
             fig = unibar_datasets_as_x(
-                list_of_datasets=self.uset, y=y_list, agg=agg,
+                list_of_datasets=self.sets, y=y_list, agg=agg,
                 suptitle=self.suptitle, figsize=figsize, 
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
@@ -2761,13 +2731,13 @@ class UnichartNotebook:
             
         elif by in ['sets', 'datasets']:
             fig = unibar_per_dataset(
-                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
         else:
             fig = unibar(
-                list_of_datasets=self.uset, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
@@ -2776,7 +2746,7 @@ class UnichartNotebook:
             if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
 
-            active_sets = [d for d in self.uset if d.select]
+            active_sets = [d for d in self.sets if d.select]
             n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
             
             calc_ncols = ncols
@@ -2826,7 +2796,7 @@ class UnichartNotebook:
 
         if by == 'dataset_x':
             fig = unibox_datasets_as_x(
-                list_of_datasets=self.uset, y=y_list, boxmode=boxmode,
+                list_of_datasets=self.sets, y=y_list, boxmode=boxmode,
                 points=points, notched=notched, suptitle=suptitle or self.suptitle,
                 figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
@@ -2842,21 +2812,21 @@ class UnichartNotebook:
             primary_y = y_list[0]
             y_limit = self.axis_limits.get(primary_y)
             fig = unibox_per_dataset(
-                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                list_of_datasets=self.sets, x=x, y=y, boxmode=boxmode,
                 points=points, notched=notched,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, y_lim=y_limit, return_axes=True
             )
         else:
             fig = unibox(
-                list_of_datasets=self.uset, x=x, y=y, boxmode=boxmode,
+                list_of_datasets=self.sets, x=x, y=y, boxmode=boxmode,
                 points=points, notched=notched, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, y_lim=None, return_axes=True
             )
             
             if fig:
-                active_sets = [d for d in self.uset if d.select]
+                active_sets = [d for d in self.sets if d.select]
                 n_items = len(y_list)
                 calc_ncols = ncols
                 if calc_ncols is None and nrows is None:
@@ -2917,7 +2887,7 @@ class UnichartNotebook:
 
         if by in ['sets', 'datasets']:
             fig = unihistogram_by_dataset(
-                list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
                 histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
@@ -2927,7 +2897,7 @@ class UnichartNotebook:
                 fig = self._apply_decorations(fig, x_list, [], 'sets', 1)
         else:
             fig = unihistogram(
-                list_of_datasets=self.uset, x=x, y=y, histfunc=histfunc, nbins=nbins,
+                list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
                 histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
@@ -2976,7 +2946,7 @@ class UnichartNotebook:
 
         if by in ['sets', 'datasets']:
             fig = unicontour_per_dataset(
-                list_of_datasets=self.uset, x=x, y=y, z=z, 
+                list_of_datasets=self.sets, x=x, y=y, z=z, 
                 contours_coloring=contours_coloring, colorscale=colorscale,
                 interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
                 ncontours=ncontours,
@@ -2985,7 +2955,7 @@ class UnichartNotebook:
             )
         else:
             fig = unicontour(
-                list_of_datasets=self.uset, x=x, y=y, z=z,
+                list_of_datasets=self.sets, x=x, y=y, z=z,
                 contours_coloring=contours_coloring, colorscale=colorscale,
                 interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
                 ncontours=ncontours,
@@ -3034,7 +3004,7 @@ class UnichartNotebook:
 
         combined_dfs = []
         
-        for ds in self.uset:
+        for ds in self.sets:
             if not ds.select:
                 continue
             
@@ -3115,12 +3085,12 @@ class UnichartNotebook:
         """
         Print a formatted table of all loaded datasets.
         """
-        if not self.uset:
+        if not self.sets:
             print("No datasets loaded.")
             return
 
         rows = []
-        for ds in self.uset:
+        for ds in self.sets:
             selected = "✓" if ds.select else "X"
             shape = f"{ds.df.shape[0]} x {ds.df.shape[1]}"
             query_info = str(ds.query)
@@ -3158,7 +3128,7 @@ class UnichartNotebook:
         if set_number is None:
             target_sets = self.selected()
             if not target_sets:
-                target_sets = self.uset
+                target_sets = self.sets
         else:
             target_sets = self._get_uset_slice(set_number)
             
@@ -3342,11 +3312,7 @@ class UnichartNotebook:
     # Interactive "GUI" Replacement
     # ------------------------------------------------------------------
     def _clear_last_fig(self):
-        """
-        Actively hollows out the massive JSON payload of the previous Plotly figure
-        before dropping the reference. This prevents rapid RAM inflation (high-water marks)
-        during tight plotting loops.
-        """
+        """Drop the previous figure's trace data to free memory before the next plot."""
         if self.last_fig is not None:
             self.last_fig.data = []
             self.last_fig.layout = {}
@@ -3430,10 +3396,7 @@ class UnichartNotebook:
         return fig
 
     def _refresh_widgets(self):
-        """
-        Rebuilds the dataset management widget list, cleanly destroying 
-        old widgets to prevent memory leaks in the kernel and the browser.
-        """
+        """Rebuild the dataset widget list, closing old widgets first to avoid memory leaks."""
         if hasattr(self, 'dataset_widget_container') and self.dataset_widget_container.children:
             for child in self.dataset_widget_container.children:
                 if hasattr(child, 'children'):
@@ -3450,7 +3413,7 @@ class UnichartNotebook:
         def update_color(change, dataset):
             dataset.color = change['new']
 
-        for i, ds in enumerate(self.uset):
+        for i, ds in enumerate(self.sets):
             
             chk = widgets.Checkbox(
                 value=ds.select, 
