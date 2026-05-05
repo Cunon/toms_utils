@@ -2299,11 +2299,49 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Analysis
     # ------------------------------------------------------------------
-    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None, suffixes=("_BASE", "")):
-        """Compute delta (absolute and %) between each study dataset and the base, and load the results."""
-        if align_on is None: align_on = self.last_x
-        if delta_parms is None: delta_parms = [self.last_y] if isinstance(self.last_y, str) else self.last_y
-        if not isinstance(delta_parms, list): delta_parms = [delta_parms]
+    def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
+              suffixes=("_BASE", ""), direction='nearest', tolerance=None):
+        """Compute delta (absolute and %) between each study dataset and the base, and load the results.
+
+        Parameters
+        ----------
+        base_idx : int
+            Index of the baseline dataset.
+        study_indices : int | list | 'all'
+            Dataset(s) to compare against the base. The base itself is always skipped.
+        align_on : str | None
+            Column to align on (nearest-match merge). Defaults to last_x.
+        delta_parms : str | list | None
+            Columns to compute deltas for. Defaults to last_y.
+        suffixes : tuple[str, str]
+            Suffixes applied to base and study columns during the merge. Must differ.
+        direction : 'nearest' | 'forward' | 'backward'
+            Passed to merge_asof — controls which study row is matched to each base row.
+        tolerance : numeric | None
+            Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
+        """
+        # Resolve align_on from last plot state
+        if align_on is None:
+            lx = self.last_x
+            align_on = lx[0] if isinstance(lx, list) else lx
+        if align_on is None:
+            raise ValueError("align_on is required when no prior plot exists.")
+        if isinstance(align_on, list):
+            raise ValueError("align_on must be a single column name, not a list.")
+
+        # Resolve delta_parms from last plot state
+        if delta_parms is None:
+            ly = self.last_y
+            delta_parms = ly if isinstance(ly, list) else ([ly] if ly is not None else [])
+        if not isinstance(delta_parms, list):
+            delta_parms = [delta_parms]
+        delta_parms = [p for p in delta_parms if p is not None]
+        if not delta_parms:
+            raise ValueError("delta_parms is required when no prior plot exists.")
+
+        lsuffix, rsuffix = suffixes
+        if lsuffix == rsuffix:
+            raise ValueError(f"suffixes must be different; both are '{lsuffix}'.")
 
         if not (0 <= base_idx < len(self.sets)):
             raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.sets)} datasets).")
@@ -2313,8 +2351,12 @@ class UnichartNotebook:
         if align_on not in base_ds.df.columns:
             raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
 
-        targets = self._get_uset_slice(study_indices)
-        lsuffix, rsuffix = suffixes
+        # Exclude the base from study targets to avoid a trivial zero-delta set
+        targets = [ds for ds in self._get_uset_slice(study_indices) if ds.index != base_idx]
+        if not targets:
+            print("No study datasets to process (base dataset excluded if present in selection).")
+            return []
+
         created = []
 
         for study_ds in targets:
@@ -2323,17 +2365,23 @@ class UnichartNotebook:
                 continue
 
             valid_parms = [p for p in delta_parms if p in base_ds.df.columns and p in study_ds.df.columns]
-            skipped = set(delta_parms) - set(valid_parms)
+            skipped = sorted(set(delta_parms) - set(valid_parms))
             if skipped:
-                print(f"Warning: skipping columns not present in both datasets: {sorted(skipped)}")
+                print(f"Warning: skipping columns not present in both datasets: {skipped}")
             if not valid_parms:
                 print(f"Warning: skipping '{study_ds.title}' — no valid delta columns found.")
                 continue
 
-            df_base = base_ds.df[[align_on] + valid_parms].sort_values(align_on)
-            df_study = study_ds.df[[align_on] + valid_parms].sort_values(align_on)
+            df_base = (base_ds.df[[align_on] + valid_parms]
+                       .sort_values(align_on).reset_index(drop=True))
+            df_study = (study_ds.df[[align_on] + valid_parms]
+                        .sort_values(align_on).reset_index(drop=True))
 
-            merged = pd.merge_asof(df_base, df_study, on=align_on, suffixes=suffixes, direction='nearest')
+            merge_kwargs = dict(on=align_on, suffixes=suffixes, direction=direction)
+            if tolerance is not None:
+                merge_kwargs['tolerance'] = tolerance
+
+            merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
 
             result = merged[[align_on]].copy()
             for parm in valid_parms:
@@ -2345,16 +2393,58 @@ class UnichartNotebook:
                     100 * (result[f"DL_{parm}"] / merged[b_col])
                 )
 
+            nan_frac = result[f"DL_{valid_parms[0]}"].isna().mean()
+            if nan_frac > 0.5:
+                print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
+                      f"(large alignment gaps; consider tolerance= or a different direction=).")
+
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
             next_index = len(self.sets)
             ds = Dataset(result, index=next_index, title=new_title)
-            ds.settype = 'delta'
+            ds.set_type = 'delta'
             self.sets.append(ds)
             print(f"Loaded Set {next_index}: {new_title}")
             created.append(ds)
 
         self._refresh_widgets()
         return created
+
+    def combine_sets(self, uset_slice, title=None, ignore_index=True):
+        """Concatenate multiple datasets row-wise into a new dataset.
+
+        Parameters
+        ----------
+        uset_slice : int | list | 'all'
+            Datasets to combine. Must resolve to at least 2 datasets.
+        title : str | None
+            Title for the new dataset. Defaults to 'Combined 0-1-2-...' using source indices.
+        ignore_index : bool
+            Reset the row index in the combined DataFrame (default True). Set to False to
+            preserve the original indices, which may be useful if they carry meaning.
+        """
+        sources = self._get_uset_slice(uset_slice)
+        if len(sources) < 2:
+            print(f"Warning: combine_sets requires at least 2 datasets (got {len(sources)}).")
+            return None
+
+        col_sets = [set(ds.df.columns) for ds in sources]
+        shared = col_sets[0].intersection(*col_sets[1:])
+        all_cols = set().union(*col_sets)
+        only_in_some = all_cols - shared
+        if only_in_some:
+            print(f"Warning: {len(only_in_some)} column(s) not present in all datasets — "
+                  f"those cells will be NaN: {sorted(only_in_some)}")
+
+        combined = pd.concat([ds.df for ds in sources], ignore_index=ignore_index)
+
+        idx_str = '-'.join(str(ds.index) for ds in sources)
+        new_title = title or f"Combined {idx_str}"
+        next_index = len(self.sets)
+        new_ds = Dataset(combined, index=next_index, title=new_title)
+        self.sets.append(new_ds)
+        print(f"Loaded Set {next_index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
+        self._refresh_widgets()
+        return new_ds
 
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
