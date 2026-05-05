@@ -1,0 +1,3 @@
+# .local_config — NOT committed to git
+NOTEBOOK_DIR="/home/tje/Documents/misc_projects/python_notebooks"
+VSCODE_CMD="code"
