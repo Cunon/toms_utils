@@ -1048,15 +1048,16 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     return _show_or_return(fig, return_axes)
 
 
-def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
-                 bin_size=None, bin_start=None, bin_end=None, 
-                 histnorm='', barmode='overlay', opacity=0.7,
-                 color=None, suptitle=None, subplot_titles=None, darkmode=False, 
+def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
+                 bin_size=None, bin_start=None, bin_end=None,
+                 histnorm='', barmode='overlay', alpha=0.7, opacity=None,
+                 color=None, suptitle=None, subplot_titles=None, darkmode=False,
                  figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
     """
     Create a unified histogram for a list of datasets.
     Subplots are organized by Variable (x).
     """
+    alpha = opacity if opacity is not None else alpha
     x_list = x if isinstance(x, list) else [x]
     n_x = len(x_list)
     nrows, ncols = _calc_grid(n_x, nrows, ncols)
@@ -1091,7 +1092,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1111,14 +1112,15 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     return _show_or_return(fig, return_axes)
 
-def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
+def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                             bin_size=None, bin_start=None, bin_end=None,
-                            histnorm='', barmode='overlay', opacity=0.7,
-                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                            histnorm='', barmode='overlay', alpha=0.7, opacity=None,
+                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
                             darkmode=False, x_lim=None, return_axes=False):
     """
     Create a unified histogram where Subplots are organized by Dataset.
     """
+    alpha = opacity if opacity is not None else alpha
     active_ds = [d for d in list_of_datasets if d.select]
     x_list = x if isinstance(x, list) else [x]
     n_sets = len(active_ds)
@@ -1163,7 +1165,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
                 name=xi,
                 legendgroup=xi,
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -2018,26 +2020,80 @@ class UnichartNotebook:
         the Dataset's value at plot time.
 
         Pass the string 'reset' as the value to clear a single attribute.
+        Pass a list of variable names to apply the same formatting to all of them.
 
         Examples
         --------
         nb.var_format('Temperature', linestyle='--')         # all Temp lines dashed
         nb.var_format('Pressure', color='blue', marker='s')  # Pressure forced blue squares
         nb.var_format('Pressure', color='reset')             # remove just the color override
+        nb.var_format(['T1', 'T2', 'T3'], color='red')       # apply to multiple variables
         """
-        fmt = self.variable_formats.setdefault(variable, {})
+        variables = variable if isinstance(variable, list) else [variable]
         pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
                  'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha}
-        for k, v in pairs.items():
-            if v is None:
-                continue
-            if v == 'reset':
-                fmt.pop(k, None)
-            else:
-                fmt[k] = v
-        if not fmt:
-            del self.variable_formats[variable]
+        for var in variables:
+            fmt = self.variable_formats.setdefault(var, {})
+            for k, v in pairs.items():
+                if v is None:
+                    continue
+                if v == 'reset':
+                    fmt.pop(k, None)
+                else:
+                    fmt[k] = v
+            if not fmt:
+                del self.variable_formats[var]
+        if isinstance(variable, list):
+            return {var: self.variable_formats.get(var, {}) for var in variable}
         return self.variable_formats.get(variable, {})
+
+    def set_format(self, uset_slice, color=None, marker=None, linestyle=None,
+                   markersize=None, linewidth=None, alpha=None):
+        """
+        Set formatting attributes on one or more datasets.
+
+        Accepts the same uset_slice selectors as other set methods: an integer
+        index, a title string, a list/tuple/set of those, a Dataset object,
+        or 'all' / None for every dataset.
+
+        Pass the string 'reset' for any attribute to revert it to its
+        index-based default (same defaults used by reset_format).
+
+        Returns a dict of {attr: value} for a single dataset, or
+        {title: {attr: value}} when multiple datasets are matched.
+
+        Examples
+        --------
+        nb.set_format(0, color='red', marker='s')      # set 0 red squares
+        nb.set_format('Run A', linestyle='--')          # dashed lines for Run A
+        nb.set_format([0, 1], alpha=0.5)               # dim first two sets
+        nb.set_format('all', linewidth=2)              # uniform line width
+        nb.set_format(0, color='reset')                # revert color to default
+        """
+        default_colors = px.colors.qualitative.Plotly
+        _defaults = {
+            'color':      lambda ds: default_colors[ds.index % len(default_colors)],
+            'marker':     lambda ds: marker_map(ds.index),
+            'linestyle':  lambda ds: None,
+            'markersize': lambda ds: 10,
+            'linewidth':  lambda ds: 2,
+            'alpha':      lambda ds: 1,
+        }
+        pairs = {'color': color, 'marker': marker, 'linestyle': linestyle,
+                 'markersize': markersize, 'linewidth': linewidth, 'alpha': alpha}
+        targets = self._get_uset_slice(uset_slice)
+        for ds in targets:
+            for attr, val in pairs.items():
+                if val is None:
+                    continue
+                setattr(ds, attr, _defaults[attr](ds) if val == 'reset' else val)
+
+        def _fmt(ds):
+            return {a: getattr(ds, a) for a in _defaults}
+
+        if len(targets) == 1:
+            return _fmt(targets[0])
+        return {ds.title: _fmt(ds) for ds in targets}
 
     def clear_var_format(self, variable=None):
         """Clear variable formatting. Pass None (or no arg) to clear everything."""
@@ -2056,8 +2112,8 @@ class UnichartNotebook:
             items = ", ".join(f"{k}={v!r}" for k, v in fmt.items())
             print(f"  {var}: {items}")
 
-    def reset_format(self, uset_slice=None, sets=True, vars=True,
-                     lines=True, highlights=True, scale=True, fonts=True):
+    def reset_format(self, uset_slice=None, all=False, sets=False, vars=False,
+                     lines=False, highlights=False, scale=False, fonts=False):
         """
         Reset formatting state back to defaults.
 
@@ -2066,6 +2122,9 @@ class UnichartNotebook:
         uset_slice : int | list | 'all' | None
             Which datasets to reset. None/'all' resets every dataset.
             Ignored when `sets=False`.
+        all : bool
+            Shorthand to enable every reset category below. Individual flags
+            still override when set explicitly alongside `all=True`.
         sets : bool
             Reset per-dataset visual attributes (color, marker, linestyle,
             markersize, linewidth, edgewidth, alpha, hue, hue_palette,
@@ -2083,12 +2142,13 @@ class UnichartNotebook:
 
         Examples
         --------
-        nb.reset_format()                  # reset everything
-        nb.reset_format(sets=False)        # keep per-dataset formatting, clear rest
-        nb.reset_format(uset_slice=[0,1])  # only reset datasets 0 and 1
-        nb.reset_format(lines=True, highlights=True, sets=False, vars=False,
-                        scale=False, fonts=False)  # only clear decorations
+        nb.reset_format(all=True)                    # reset everything
+        nb.reset_format(sets=True)                   # reset only per-dataset formatting
+        nb.reset_format(lines=True, highlights=True) # clear only decorations
+        nb.reset_format(uset_slice=[0, 1], sets=True) # only reset datasets 0 and 1
         """
+        if all:
+            sets = vars = lines = highlights = scale = fonts = True
         default_colors = px.colors.qualitative.Plotly
 
         if sets:
@@ -2462,17 +2522,18 @@ class UnichartNotebook:
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
-    def highlight(self, column, range_tuple, color='yellow', opacity=0.2):
+    def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot."""
+        alpha = opacity if opacity is not None else alpha
         if range_tuple == 'clear':
             if column == 'all':
                 self.highlights.clear()
             else:
                 self.highlights.pop(column, None)
             return
-            
+
         if column not in self.highlights: self.highlights[column] = []
-        self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
+        self.highlights[column].append({'range': range_tuple, 'color': color, 'alpha': alpha})
         
     def scale(self, column, range_tuple):
         """
@@ -2773,7 +2834,7 @@ class UnichartNotebook:
             if col == x:
                 for h in hls:
                     fig.add_vrect(x0=h['range'][0], x1=h['range'][1],
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
             elif col in yref_for:
                 yref = yref_for[col]
@@ -2781,7 +2842,7 @@ class UnichartNotebook:
                     fig.add_shape(type='rect', x0=0, x1=1,
                                   y0=h['range'][0], y1=h['range'][1],
                                   xref='paper', yref=yref,
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
 
         fig = self._apply_fonts(fig)
@@ -2955,13 +3016,14 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
-    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None, 
+    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
-                    histnorm='', barmode='overlay', opacity=0.7,
+                    histnorm='', barmode='overlay', alpha=0.7, opacity=None,
                     color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Histograms.
         """
+        alpha = opacity if opacity is not None else alpha
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -2979,7 +3041,7 @@ class UnichartNotebook:
             fig = unihistogram_by_dataset(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -2989,7 +3051,7 @@ class UnichartNotebook:
             fig = unihistogram(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -3459,12 +3521,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
                                     xref=xref, yref=f'{yref} domain',
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -3476,12 +3538,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
                                     xref=f'{xref} domain', yref=yref,
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
         return fig
 
