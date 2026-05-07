@@ -3140,32 +3140,34 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None):
+    def table(self, cols=None, title=None, return_df=False):
         """
-        Display a Plotly Table of specific columns from selected datasets.
+        Display a nicely formatted HTML table of specific columns from selected datasets.
         """
+        from IPython.display import HTML
+
         if cols is None:
             if self.last_x is None or self.last_y is None:
                 print("No columns specified and no previous plot variables defined.")
                 return
-            
+
             y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
             target_cols = [self.last_x] + y_part
         else:
             target_cols = cols if isinstance(cols, list) else [cols]
 
         combined_dfs = []
-        
+
         for ds in self.sets:
             if not ds.select:
                 continue
-            
+
             valid_cols = [c for c in target_cols if c in ds.df.columns]
-            
+
             if not valid_cols:
                 continue
-                
-            subset = ds.df[valid_cols]
+
+            subset = ds.df[valid_cols].copy()
             subset.insert(0, 'Dataset', ds.title)
             combined_dfs.append(subset)
 
@@ -3174,43 +3176,82 @@ class UnichartNotebook:
             return
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
+
+        def _round_sig5(x):
+            try:
+                if x != 0:
+                    return float(f'{x:.5g}')
+                return 0.0
+            except (TypeError, ValueError):
+                return x
+
+        for col in final_df.columns:
+            if pd.api.types.is_float_dtype(final_df[col]):
+                final_df[col] = final_df[col].map(_round_sig5)
+
         final_df = final_df.fillna('-')
 
         if self.darkmode:
-            header_color = 'rgb(30, 30, 30)'
-            cell_color = 'rgb(50, 50, 50)'
-            font_color = 'white'
-            line_color = 'rgb(70, 70, 70)'
+            bg = '#1e1e1e'
+            header_bg = '#2d2d2d'
+            row_alt_bg = '#252525'
+            border = '#3a3a3a'
+            text = '#e0e0e0'
+            title_color = '#ffffff'
         else:
-            header_color = 'rgb(230, 230, 230)'
-            cell_color = 'white'
-            font_color = 'black'
-            line_color = 'rgb(200, 200, 200)'
+            bg = '#ffffff'
+            header_bg = '#f0f0f0'
+            row_alt_bg = '#f9f9f9'
+            border = '#d0d0d0'
+            text = '#1a1a1a'
+            title_color = '#111111'
 
-        fig = go.Figure(data=[go.Table(
-            header=dict(
-                values=list(final_df.columns),
-                fill_color=header_color,
-                align='left',
-                font=dict(color=font_color, size=12, weight='bold'),
-                line_color=line_color
-            ),
-            cells=dict(
-                values=[final_df[k].tolist() for k in final_df.columns],
-                fill_color=cell_color,
-                align='left',
-                font=dict(color=font_color, size=11),
-                line_color=line_color,
-                height=25
-            )
-        )])
+        uid = f"tbl_{id(final_df)}"
+        title_html = (
+            f'<div style="font-family:sans-serif;font-size:14px;font-weight:600;'
+            f'color:{title_color};margin-bottom:6px;">{title}</div>'
+            if title else ''
+        )
 
-        layout_args = {
-            'title': {'text': title or "Data Table", 'x': 0.5},
-            'template': "plotly_dark" if self.darkmode else "plotly_white",
-            'margin': dict(l=20, r=20, t=50, b=20),
-        }
-        fig.update_layout(**layout_args)
+        styled = (
+            final_df.style
+            .set_table_attributes(f'id="{uid}"')
+            .set_table_styles([
+                {'selector': 'table', 'props': [
+                    ('border-collapse', 'collapse'),
+                    ('font-family', 'sans-serif'),
+                    ('font-size', '12px'),
+                    ('color', text),
+                    ('background-color', bg),
+                    ('width', '100%'),
+                ]},
+                {'selector': 'thead th', 'props': [
+                    ('background-color', header_bg),
+                    ('color', text),
+                    ('font-weight', '600'),
+                    ('padding', '7px 12px'),
+                    ('border', f'1px solid {border}'),
+                    ('text-align', 'left'),
+                    ('white-space', 'nowrap'),
+                ]},
+                {'selector': 'tbody td', 'props': [
+                    ('padding', '5px 12px'),
+                    ('border', f'1px solid {border}'),
+                    ('background-color', bg),
+                ]},
+                {'selector': 'tbody tr:nth-child(even) td', 'props': [
+                    ('background-color', row_alt_bg),
+                ]},
+                {'selector': 'tbody tr:hover td', 'props': [
+                    ('filter', 'brightness(1.08)'),
+                ]},
+            ])
+            .hide(axis='index')
+        )
+
+        display(HTML(title_html + styled.to_html()))
+        if return_df:
+            return final_df
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
@@ -3403,6 +3444,49 @@ class UnichartNotebook:
         print(sep)
         for row in rows:
             print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
+
+    def _resolve_parms(self, parms):
+        if parms is None:
+            y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
+            x_part = [self.last_x] if self.last_x else []
+            return x_part + y_part
+        return parms if isinstance(parms, list) else [parms]
+
+    def min(self, uset_slice=None, parms=None):
+        target_cols = self._resolve_parms(parms)
+        if not target_cols:
+            print("No columns specified and no previous plot variables defined.")
+            return pd.DataFrame()
+        active_ds = self._get_uset_slice(uset_slice) if uset_slice is not None else self.selected()
+        if not active_ds:
+            print("No datasets selected.")
+            return pd.DataFrame()
+        rows = {}
+        for ds in active_ds:
+            rows[ds.title] = {
+                col: ds.df[col].dropna().min()
+                for col in target_cols
+                if col in ds.df.columns and pd.api.types.is_numeric_dtype(ds.df[col])
+            }
+        return pd.DataFrame(rows).T
+
+    def max(self, uset_slice=None, parms=None):
+        target_cols = self._resolve_parms(parms)
+        if not target_cols:
+            print("No columns specified and no previous plot variables defined.")
+            return pd.DataFrame()
+        active_ds = self._get_uset_slice(uset_slice) if uset_slice is not None else self.selected()
+        if not active_ds:
+            print("No datasets selected.")
+            return pd.DataFrame()
+        rows = {}
+        for ds in active_ds:
+            rows[ds.title] = {
+                col: ds.df[col].dropna().max()
+                for col in target_cols
+                if col in ds.df.columns and pd.api.types.is_numeric_dtype(ds.df[col])
+            }
+        return pd.DataFrame(rows).T
 
     def help(self):
         """
