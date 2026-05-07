@@ -1760,7 +1760,9 @@ class UnichartNotebook:
         self.subplot_title_size = None
         self.colorbar_size = None
         self.hover_size = None
-        
+
+        self.grid_opts = {}
+
         print("UniChart Notebook Environment Initialized.")
 
     # ------------------------------------------------------------------
@@ -2113,7 +2115,7 @@ class UnichartNotebook:
             print(f"  {var}: {items}")
 
     def reset_format(self, uset_slice=None, all=False, sets=False, vars=False,
-                     lines=False, highlights=False, scale=False, fonts=False):
+                     lines=False, highlights=False, scale=False, fonts=False, grid=False):
         """
         Reset formatting state back to defaults.
 
@@ -2148,7 +2150,7 @@ class UnichartNotebook:
         nb.reset_format(uset_slice=[0, 1], sets=True) # only reset datasets 0 and 1
         """
         if all:
-            sets = vars = lines = highlights = scale = fonts = True
+            sets = vars = lines = highlights = scale = fonts = grid = True
         default_colors = px.colors.qualitative.Plotly
 
         if sets:
@@ -2185,6 +2187,9 @@ class UnichartNotebook:
                          'colorbar_size', 'hover_size'):
                 setattr(self, attr, None)
 
+        if grid:
+            self.grid_opts = {}
+
         parts = []
         if sets:      parts.append("dataset formatting")
         if vars:      parts.append("variable formats")
@@ -2192,6 +2197,7 @@ class UnichartNotebook:
         if highlights: parts.append("highlights")
         if scale:     parts.append("axis limits")
         if fonts:     parts.append("font sizes")
+        if grid:      parts.append("grid")
         print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
 
     def reg_info(self, uset_slice=None):
@@ -2611,6 +2617,91 @@ class UnichartNotebook:
             'hover':          getattr(self, 'hover_size', None),
         }
 
+    def grid(self, major=True, minor=False, color=None, minor_color=None,
+             width=1, minor_width=0.5, dash='dot', minor_dash='dot',
+             axis='both', reset=False):
+        """
+        Configure persistent grid line appearance for all subsequent plots.
+
+        Parameters
+        ----------
+        major : bool
+            Show major grid lines (default True).
+        minor : bool
+            Show minor grid lines (default False).
+        color : str | None
+            Major grid line color. None uses the theme default.
+        minor_color : str | None
+            Minor grid line color. None falls back to `color`.
+        width : float
+            Major grid line width in px.
+        minor_width : float
+            Minor grid line width in px.
+        dash : str
+            Major line style — 'solid', 'dot', 'dash', 'longdash', 'dashdot'.
+        minor_dash : str
+            Minor line style.
+        axis : 'both' | 'x' | 'y'
+            Which axes to apply to.
+        reset : bool
+            Clear all stored grid options and revert to Plotly defaults.
+
+        Examples
+        --------
+        nb.grid(major=True, minor=True, color='#888', dash='dot')
+        nb.grid(axis='x', major=False)   # hide x grid only
+        nb.grid(reset=True)              # back to defaults
+        """
+        if reset:
+            self.grid_opts = {}
+            return
+
+        opts = {
+            'major': major,
+            'minor': minor,
+            'color': color,
+            'minor_color': minor_color or color,
+            'width': width,
+            'minor_width': minor_width,
+            'dash': dash,
+            'minor_dash': minor_dash,
+            'axis': axis,
+        }
+        self.grid_opts = opts
+
+    def _apply_grid(self, fig):
+        """Apply stored grid options to a Plotly figure."""
+        if fig is None or not self.grid_opts:
+            return fig
+
+        g = self.grid_opts
+        axis = g.get('axis', 'both')
+
+        major_kw = dict(
+            showgrid=g['major'],
+            gridwidth=g['width'],
+            griddash=g['dash'],
+        )
+        if g.get('color'):
+            major_kw['gridcolor'] = g['color']
+
+        minor_kw = dict(
+            showgrid=g['minor'],
+            gridwidth=g['minor_width'],
+            griddash=g['minor_dash'],
+        )
+        if g.get('minor_color'):
+            minor_kw['gridcolor'] = g['minor_color']
+
+        axis_kw = dict(**major_kw, minor=minor_kw)
+
+        if axis in ('both', 'x'):
+            fig.update_xaxes(**axis_kw)
+        if axis in ('both', 'y'):
+            fig.update_yaxes(**axis_kw)
+
+        return fig
+
     def _apply_fonts(self, fig):
         """Apply stored font sizes to a Plotly figure."""
         if fig is None:
@@ -2655,6 +2746,7 @@ class UnichartNotebook:
                         except (AttributeError, ValueError):
                             cb.title = dict(text=str(cb.title), font=dict(size=cb_size))
 
+        self._apply_grid(fig)
         return fig
 
     # ------------------------------------------------------------------
