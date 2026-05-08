@@ -2556,6 +2556,121 @@ class UnichartNotebook:
             else:
                 raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
 
+    def load_parm_dict(self, parm_dict, clear=False):
+        """
+        Bulk-load parameter configuration: descriptions, variable formatting,
+        reference lines, highlight bands, and axis limits.
+
+        Each key in parm_dict is a column/parameter name. Recognized sub-keys:
+
+            description : str
+                Human-readable label shown by list_parms().
+            color, marker, linestyle, markersize, linewidth, alpha
+                Variable-level formatting overrides (same as var_format()).
+            line : dict | list[dict]
+                Reference line(s). Each entry:
+                    {'level': <value>, 'color': 'red', 'dash': 'dash'}
+            highlight : dict | list[dict]
+                Highlight band(s). Each entry:
+                    {'range': (lo, hi), 'color': 'yellow', 'alpha': 0.2}
+            scale : tuple(min, max)
+                Axis display limits for this parameter.
+
+        Parameters
+        ----------
+        parm_dict : dict[str, dict]
+        clear : bool
+            When True, wipe existing descriptions, variable_formats, lines,
+            highlights, and axis_limits before applying the new configuration.
+
+        Example
+        -------
+        nb.load_parm_dict({
+            'Temperature': {
+                'description': 'Ambient temperature (°C)',
+                'color': 'red',
+                'linestyle': '--',
+                'line': {'level': 100, 'color': 'darkred', 'dash': 'dash'},
+                'highlight': {'range': (90, 110), 'color': 'orange', 'alpha': 0.15},
+                'scale': (0, 200),
+            },
+            'Pressure': {
+                'description': 'System pressure (bar)',
+                'color': 'blue',
+                'scale': (0, 10),
+            },
+        })
+        """
+        if clear:
+            self.parm_description_dict.clear()
+            self.variable_formats.clear()
+            self.lines.clear()
+            self.highlights.clear()
+            self.axis_limits.clear()
+
+        n_loaded = 0
+        warnings_issued = []
+
+        for parm_name, options in parm_dict.items():
+            if not isinstance(options, dict):
+                warnings_issued.append(f"'{parm_name}': options must be a dict, skipped.")
+                continue
+
+            if 'description' in options:
+                self.parm_description_dict[parm_name] = options['description']
+
+            fmt_kwargs = {k: v for k, v in options.items() if k in _VAR_FORMAT_KEYS}
+            if fmt_kwargs:
+                self.var_format(parm_name, **fmt_kwargs)
+
+            if 'line' in options:
+                entries = options['line']
+                if isinstance(entries, dict):
+                    entries = [entries]
+                for entry in entries:
+                    level = entry.get('level')
+                    if level is None:
+                        warnings_issued.append(f"'{parm_name}' line: missing 'level', skipped.")
+                        continue
+                    if parm_name not in self.lines:
+                        self.lines[parm_name] = []
+                    dash_val = entry.get('dash', 'dash')
+                    self.lines[parm_name].append({
+                        'level': level,
+                        'color': entry.get('color', 'red'),
+                        'dash':  LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash_val, dash_val),
+                    })
+
+            if 'highlight' in options:
+                entries = options['highlight']
+                if isinstance(entries, dict):
+                    entries = [entries]
+                for entry in entries:
+                    rng = entry.get('range')
+                    if rng is None or len(rng) != 2:
+                        warnings_issued.append(f"'{parm_name}' highlight: missing/invalid 'range', skipped.")
+                        continue
+                    if parm_name not in self.highlights:
+                        self.highlights[parm_name] = []
+                    self.highlights[parm_name].append({
+                        'range': tuple(rng),
+                        'color': entry.get('color', 'yellow'),
+                        'alpha': entry.get('alpha', entry.get('opacity', 0.2)),
+                    })
+
+            if 'scale' in options:
+                rng = options['scale']
+                if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                    self.axis_limits[parm_name] = tuple(rng)
+                else:
+                    warnings_issued.append(f"'{parm_name}' scale: must be (min, max), skipped.")
+
+            n_loaded += 1
+
+        for w in warnings_issued:
+            print(f"Warning: {w}")
+        print(f"Loaded {n_loaded} parameter(s) from dictionary.")
+
     # ------------------------------------------------------------------
     # Font Management
     # ------------------------------------------------------------------
