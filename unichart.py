@@ -3061,9 +3061,19 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-    def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+    def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None,
+            suppress_legends=False, legend=None, legend_title=None):
         """
         Unified interface for Bar Charts.
+
+        Parameters
+        ----------
+        legend : str or None
+            Legend placement. ``'above'`` — horizontal bar above the plot;
+            ``'right'`` — vertical sidebar (Plotly default); ``'off'`` — hide
+            the legend entirely. ``None`` leaves the figure default unchanged.
+        legend_title : str or None
+            Text to display as the legend title.
         """
         self._clear_last_fig()
 
@@ -3076,7 +3086,7 @@ class UnichartNotebook:
         if by == 'dataset_x':
             fig = unibar_datasets_as_x(
                 list_of_datasets=self.sets, y=y_list, agg=agg,
-                suptitle=self.suptitle, figsize=figsize, 
+                suptitle=self.suptitle, figsize=figsize,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
             if fig:
@@ -3084,6 +3094,14 @@ class UnichartNotebook:
                 fig = self._apply_fonts(fig)
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
+                if legend == 'off':
+                    fig.update_layout(showlegend=False)
+                elif legend == 'above':
+                    fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+                elif legend == 'right':
+                    fig.update_layout(legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
+                if legend_title is not None:
+                    fig.update_layout(legend_title_text=legend_title)
                 self.last_fig = fig
             return fig
             
@@ -3132,8 +3150,16 @@ class UnichartNotebook:
             fig = self._apply_fonts(fig)
             if suppress_legends:
                 fig.update_traces(visible='legendonly')
+            if legend == 'off':
+                fig.update_layout(showlegend=False)
+            elif legend == 'above':
+                fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+            elif legend == 'right':
+                fig.update_layout(legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
+            if legend_title is not None:
+                fig.update_layout(legend_title_text=legend_title)
             self.last_fig = fig
-            
+
         return fig
 
     # ------------------------------------------------------------------
@@ -3347,7 +3373,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None, return_df=False):
+    def table(self, cols=None, title=None, return_df=False, font=None, font_size=None, text_color=None):
         """
         Display a nicely formatted HTML table of specific columns from selected datasets.
         """
@@ -3384,17 +3410,17 @@ class UnichartNotebook:
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
 
-        def _round_sig5(x):
+        def _fmt_sig5(x):
             try:
-                if x != 0:
-                    return float(f'{x:.5g}')
-                return 0.0
+                if pd.isna(x):
+                    return '-'
+                return f'{x:.5g}'
             except (TypeError, ValueError):
                 return x
 
         for col in final_df.columns:
             if pd.api.types.is_float_dtype(final_df[col]):
-                final_df[col] = final_df[col].map(_round_sig5)
+                final_df[col] = final_df[col].map(_fmt_sig5)
 
         final_df = final_df.fillna('-')
 
@@ -3413,6 +3439,12 @@ class UnichartNotebook:
             text = '#1a1a1a'
             title_color = '#111111'
 
+        resolved_font = font or 'sans-serif'
+        resolved_size = f'{font_size}px' if isinstance(font_size, int) else (font_size or '12px')
+        if text_color:
+            text = text_color
+            title_color = text_color
+
         uid = f"tbl_{id(final_df)}"
         title_html = (
             f'<div style="font-family:sans-serif;font-size:14px;font-weight:600;'
@@ -3426,8 +3458,8 @@ class UnichartNotebook:
             .set_table_styles([
                 {'selector': 'table', 'props': [
                     ('border-collapse', 'collapse'),
-                    ('font-family', 'sans-serif'),
-                    ('font-size', '12px'),
+                    ('font-family', resolved_font),
+                    ('font-size', resolved_size),
                     ('color', text),
                     ('background-color', bg),
                     ('width', '100%'),
@@ -3445,6 +3477,7 @@ class UnichartNotebook:
                     ('padding', '5px 12px'),
                     ('border', f'1px solid {border}'),
                     ('background-color', bg),
+                    ('color', text),
                 ]},
                 {'selector': 'tbody tr:nth-child(even) td', 'props': [
                     ('background-color', row_alt_bg),
