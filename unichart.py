@@ -880,27 +880,35 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
 
     return _show_or_return(fig, return_axes)
 
-def unibar(list_of_datasets, x, y, barmode='group', color=None, 
+def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
+           barmode='group', color=None, 
            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
            darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
            y_lim=None, return_axes=False):
-    """
-    Grouped Bar Chart version of uniplot. 
-    Subplots are organized by Y-variables.
-    """
     y_list = y if isinstance(y, list) else [y]
+    markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
+    variable_formats = variable_formats or {}
     n_y = len(y_list)
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Bar Comparison: {x}", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
+
+    edge_default = 'white' if darkmode else 'black'
+
+    # Track which (marker_col, y_subplot) legend entries we've already shown,
+    # for marker columns that are explicitly styled via var_format.
+    marker_legend_shown = set()
 
     for ds in list_of_datasets:
         if not ds.select: continue
         df = ds.df
+        offset_group = f"set_{ds.index}"
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -910,26 +918,77 @@ def unibar(list_of_datasets, x, y, barmode='group', color=None,
                 x=df[x], y=df[yi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
+                offsetgroup=offset_group,
+                alignmentgroup="bars",
                 marker_color=ds.color if not color else color,
                 opacity=ds.alpha,
-                showlegend=(idx_y == 0)
+                showlegend=(idx_y == 0)             # bars always get one legend entry per set
             ), row=row, col=col)
+
+            for m_idx, m_col in enumerate(markers_list):
+                if m_col not in df.columns: continue
+
+                var_fmt = variable_formats.get(m_col, {})
+                styled = bool(var_fmt)              # styled = has any var_format override
+
+                m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx + 1))
+                m_color  = var_fmt.get('color') or (color if color else ds.color)
+                m_size   = var_fmt.get('markersize', max(ds.markersize, 10))
+                m_alpha  = var_fmt.get('alpha', ds.alpha)
+
+                # Legend strategy:
+                #   styled marker      -> ONE entry per (marker_col, subplot), named just the column
+                #   unstyled marker    -> one entry per (dataset, marker_col), grouped with dataset
+                if styled:
+                    legend_key = (m_col, idx_y)
+                    show = legend_key not in marker_legend_shown
+                    if show:
+                        marker_legend_shown.add(legend_key)
+                    trace_name = m_col
+                    legend_group = f"marker_{m_col}"
+                else:
+                    show = (idx_y == 0)
+                    trace_name = f"{ds.index}: {ds.title} — {m_col}"
+                    legend_group = f"group_{ds.index}"
+
+                fig.add_trace(go.Scatter(
+                    x=df[x], y=df[m_col],
+                    mode='markers',
+                    name=trace_name,
+                    legendgroup=legend_group,
+                    offsetgroup=offset_group,
+                    alignmentgroup="bars",
+                    marker=dict(
+                        symbol=m_symbol,
+                        size=m_size,
+                        color=m_color,
+                        opacity=m_alpha,
+                        line=dict(width=1.5, color=edge_default),
+                    ),
+                    showlegend=show,
+                    hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
+                                   f"{m_col}: %{{y:.4g}}<extra></extra>")
+                ), row=row, col=col)
 
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or "Value")
     if y_lim: fig.update_yaxes(range=y_lim)
 
     return _show_or_return(fig, return_axes)
-
-def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
+def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=None,
+                       barmode='group',
                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                        darkmode=False, y_lim=None, return_axes=False):
     """
-    Grouped Bar Chart version of uniplot_per_dataset.
-    Subplots are organized by Dataset.
+    Grouped Bar Chart. Subplots are organized by Dataset.
+
+    variable_formats applies to BOTH bar variables and marker columns in
+    this view, since color encodes variable (not dataset) within each subplot.
     """
     active_ds = [d for d in list_of_datasets if d.select]
     y_list = y if isinstance(y, list) else [y]
+    markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
+    variable_formats = variable_formats or {}
     n_sets = len(active_ds)
     nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
@@ -937,8 +996,12 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
     color_cycle = px.colors.qualitative.Plotly
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Bar Comparison", figsize,
-        barmode=barmode
+        barmode=barmode,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
+
+    edge_default = 'white' if darkmode else 'black'
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -946,13 +1009,46 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
         
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
-            
+            offset_group = f"var_{yi}"
+
+            var_fmt = variable_formats.get(yi, {})
+            bar_color = var_fmt.get('color') or color_cycle[idx_y % len(color_cycle)]
+            bar_alpha = var_fmt.get('alpha', 1.0)
+
             fig.add_trace(go.Bar(
                 x=df[x], y=df[yi],
                 name=yi,
                 legendgroup=yi,
-                marker_color=color_cycle[idx_y % len(color_cycle)],
+                offsetgroup=offset_group,
+                alignmentgroup="bars",
+                marker_color=bar_color,
+                opacity=bar_alpha,
                 showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+        for m_idx, m_col in enumerate(markers_list):
+            if m_col not in df.columns: continue
+
+            var_fmt = variable_formats.get(m_col, {})
+            m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx))
+            m_color  = var_fmt.get('color') or color_cycle[(len(y_list) + m_idx) % len(color_cycle)]
+            m_size   = var_fmt.get('markersize', 12)
+            m_alpha  = var_fmt.get('alpha', 1.0)
+
+            fig.add_trace(go.Scatter(
+                x=df[x], y=df[m_col],
+                mode='markers',
+                name=m_col,
+                legendgroup=f"marker_{m_col}",
+                marker=dict(
+                    symbol=m_symbol,
+                    size=m_size,
+                    color=m_color,
+                    opacity=m_alpha,
+                    line=dict(width=1.5, color=edge_default),
+                ),
+                showlegend=(idx_ds == 0),
+                hovertemplate=f"<b>{m_col}</b><br>{x}: %{{x}}<br>%{{y:.4g}}<extra></extra>"
             ), row=row, col=col)
 
     fig.update_xaxes(title_text=x)
@@ -1064,7 +1160,9 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or x_list)
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Distribution Comparison", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1133,7 +1231,9 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
     color_cycle = px.colors.qualitative.Plotly
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Distribution Analysis", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1452,7 +1552,8 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
         darkmode, suptitle or f"Variables by Dataset ({agg})", figsize,
         barmode='group',
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
-        margin=dict(r=50 + (extras_count * 80))
+        margin=dict(r=50 + (extras_count * 80), t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     return _show_or_return(fig, return_axes)
@@ -2793,9 +2894,14 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-    def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+    def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
+            figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
+
+        Marker overlay formatting is controlled via `var_format`. Examples:
+            nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
+            nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
         """
         self._clear_last_fig()
 
@@ -2806,6 +2912,8 @@ class UnichartNotebook:
         y_list = y if isinstance(y, list) else [y]
 
         if by == 'dataset_x':
+            if markers:
+                print("Warning: `markers` is not supported with by='dataset_x'.")
             fig = unibar_datasets_as_x(
                 list_of_datasets=self.sets, y=y_list, agg=agg,
                 suptitle=self.suptitle, figsize=figsize, 
@@ -2821,17 +2929,21 @@ class UnichartNotebook:
             
         elif by in ['sets', 'datasets']:
             fig = unibar_per_dataset(
-                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, markers=markers,
+                variable_formats=self.variable_formats,         # <-- pass through
+                barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
         else:
             fig = unibar(
-                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, markers=markers,
+                variable_formats=self.variable_formats,         # <-- pass through
+                barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
-            
+
         if fig:
             if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
@@ -3103,7 +3215,7 @@ class UnichartNotebook:
             if not valid_cols:
                 continue
                 
-            subset = ds.df[valid_cols]
+            subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
             subset.insert(0, 'Dataset', ds.title)
             combined_dfs.append(subset)
 
@@ -3125,12 +3237,15 @@ class UnichartNotebook:
             font_color = 'black'
             line_color = 'rgb(200, 200, 200)'
 
+        # Bold header text via HTML — works in all Plotly versions
+        header_values = [f"<b>{c}</b>" for c in final_df.columns]
+
         fig = go.Figure(data=[go.Table(
             header=dict(
-                values=list(final_df.columns),
+                values=header_values,
                 fill_color=header_color,
                 align='left',
-                font=dict(color=font_color, size=12, weight='bold'),
+                font=dict(color=font_color, size=12),     # <-- removed weight='bold'
                 line_color=line_color
             ),
             cells=dict(
@@ -3149,6 +3264,11 @@ class UnichartNotebook:
             'margin': dict(l=20, r=20, t=50, b=20),
         }
         fig.update_layout(**layout_args)
+
+        fig = self._apply_fonts(fig)                    # <-- consistent with plot/bar/box
+        self.last_fig = fig                             # <-- so save_png works
+        # fig.show()                                      # <-- the actual fix
+        return fig
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
