@@ -595,9 +595,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
     for dataset in list_of_datasets:
         if not dataset.select: continue
-        
+
         base_df = dataset.df
-        
+
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
         cur_hue = fmt.get('hue') or hue
@@ -611,35 +611,44 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
+        base_cols = base_df.columns
+        cols_upper = None  # built lazily on first case-insensitive miss
+        valid_hover = [p for p in hover_parms if p in base_cols]
+        hue_in_cols = bool(cur_hue) and cur_hue in base_cols
+        ds_order = dataset.order
+        order_in_cols = bool(ds_order) and ds_order != 'index' and ds_order in base_cols
+        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
+        if ds_order == 'index':
+            sorted_base_df = sorted_base_df.sort_index()
+        elif order_in_cols:
+            sorted_base_df = sorted_base_df.sort_values(by=ds_order)
+        else:
+            sorted_base_df = sorted_base_df.sort_index()
+
         for idx_p, (x_name, yi) in enumerate(pairs):
             row = idx_p // ncols + 1
             col = idx_p % ncols + 1
 
-            if yi not in base_df.columns: continue
+            if yi not in base_cols: continue
 
-            if x_name not in base_df.columns:
-                cols_upper = {c.upper(): c for c in base_df.columns}
+            if x_name in base_cols:
+                x_col = x_name
+            else:
+                if cols_upper is None:
+                    cols_upper = {c.upper(): c for c in base_cols}
                 x_key = cols_upper.get(str(x_name).upper())
                 if not x_key: continue
                 x_col = x_key
-            else:
-                x_col = x_name
 
             req_cols = [x_col, yi]
-            if cur_hue and cur_hue in base_df.columns: req_cols.append(cur_hue)
-            valid_hover = [p for p in hover_parms if p in base_df.columns]
+            if hue_in_cols: req_cols.append(cur_hue)
             req_cols.extend(valid_hover)
-            if dataset.order and dataset.order != 'index' and dataset.order in base_df.columns:
-                req_cols.append(dataset.order)
-            
-            req_cols = list(dict.fromkeys(req_cols))
-            
-            valid_cols_mask = ~base_df.columns.duplicated()
-            df = base_df.loc[:, valid_cols_mask][req_cols]
+            if order_in_cols:
+                req_cols.append(ds_order)
 
-            if dataset.order == 'index': df = df.sort_index()
-            elif dataset.order: df = df.sort_values(by=dataset.order)
-            else: df = df.sort_index()
+            req_cols = list(dict.fromkeys(req_cols))
+
+            df = sorted_base_df[req_cols]
 
             custom_data_cols = []
             seen_cols = set()
@@ -1714,28 +1723,30 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
     for ds in active:
         base_df = ds.df
-        if x not in base_df.columns:
+        base_cols = base_df.columns
+        if x not in base_cols:
             continue
 
         ds_hover = display_parms if display_parms is not None else getattr(ds, 'display_parms', [])
-        valid_hover = [p for p in (ds_hover or []) if p in base_df.columns]
+        valid_hover = [p for p in (ds_hover or []) if p in base_cols]
+
+        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
+        order_col = getattr(ds, 'order', None)
+        if order_col == 'index':
+            sorted_base_df = sorted_base_df.sort_index()
+        elif order_col and order_col in sorted_base_df.columns:
+            sorted_base_df = sorted_base_df.sort_values(by=order_col)
+        else:
+            sorted_base_df = sorted_base_df.sort_index()
 
         for idx_y, yi in enumerate(y_list):
-            if yi not in base_df.columns:
+            if yi not in base_cols:
                 continue
 
             fmt = _resolve_var_format(ds, yi, variable_formats)
 
             req_cols = list(dict.fromkeys([x, yi] + valid_hover))
-            df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
-
-            order_col = getattr(ds, 'order', None)
-            if order_col == 'index':
-                df = df.sort_index()
-            elif order_col and order_col in df.columns:
-                df = df.sort_values(by=order_col)
-            else:
-                df = df.sort_index()
+            df = sorted_base_df[req_cols]
 
             parts = []
             if fmt['linestyle']:
@@ -1831,8 +1842,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 class UnichartNotebook:
     def __init__(self):
         self.sets = []
-        self.dataset_widget_container = widgets.VBox([])
-        
+
         # State Memory
         self.last_x = None
         self.last_y = None
@@ -1936,8 +1946,6 @@ class UnichartNotebook:
                     exec(f"{column} = '{column}'", globals())
                 except Exception as e:
                     print(f"Could not create variable for column '{column}': {e}")
-        
-        self._refresh_widgets()
 
     def load_clipboard(self, **kwargs):
         """Quickly load data from system clipboard."""
@@ -1949,7 +1957,6 @@ class UnichartNotebook:
 
     def clear_data(self):
         self.sets = []
-        self._refresh_widgets()
         print("All datasets cleared.")
 
     def set_title(self, uset_slice, title):
@@ -1959,7 +1966,6 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds.title = str(title)
             ds.title_format = f"{ds.title} {ds.index}"
-        self._refresh_widgets()
 
     # ------------------------------------------------------------------
     # Selection & Filtering
@@ -2010,7 +2016,6 @@ class UnichartNotebook:
         for ds in self.sets: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
-        self._refresh_widgets()
 
     def selected(self):
         """Get the currently selected datasets."""
@@ -2019,25 +2024,21 @@ class UnichartNotebook:
     def omit(self, uset_slice=None):
         for ds in self._get_uset_slice(uset_slice):
             ds.select = False
-        self._refresh_widgets()
 
     def restore(self, uset_slice=None):
         targets = self.sets if uset_slice == "all" else self._get_uset_slice(uset_slice)
         for ds in targets:
             ds.select = True
-        self._refresh_widgets()
 
     def query(self, uset_slice=None, query_str=None):
         targets = list(self._get_uset_slice(uset_slice))
         if not targets:
-            self._refresh_widgets()
             return
 
         if not query_str:
             for ds in targets:
                 ds._query = query_str
                 ds._df_filtered = ds._df_full
-            self._refresh_widgets()
             return
 
         def _run(ds):
@@ -2060,8 +2061,6 @@ class UnichartNotebook:
                 print(f"No data in set {ds.index} after query: {query_str}. Turning Set Off...")
                 ds.select = False
                 ds._df_filtered = ds._df_full
-
-        self._refresh_widgets()
 
     # ------------------------------------------------------------------
     # Styling
@@ -2549,7 +2548,6 @@ class UnichartNotebook:
             print(f"Loaded Set {next_index}: {new_title}")
             created.append(ds)
 
-        self._refresh_widgets()
         return created
 
     def combine_sets(self, uset_slice, title=None, ignore_index=True):
@@ -2586,7 +2584,6 @@ class UnichartNotebook:
         new_ds = Dataset(combined, index=next_index, title=new_title)
         self.sets.append(new_ds)
         print(f"Loaded Set {next_index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
-        self._refresh_widgets()
         return new_ds
 
     # ------------------------------------------------------------------
@@ -3725,61 +3722,3 @@ class UnichartNotebook:
                                       opacity=h['alpha'], layer='below', line_width=0)
 
         return fig
-
-    def _refresh_widgets(self):
-        """Rebuild the dataset widget list, closing old widgets first to avoid memory leaks."""
-        if hasattr(self, 'dataset_widget_container') and self.dataset_widget_container.children:
-            for child in self.dataset_widget_container.children:
-                if hasattr(child, 'children'):
-                    for sub_child in child.children:
-                        sub_child.close()
-                child.close()
-                
-        items = []
-        items.append(widgets.HTML("<b>Dataset Manager</b>"))
-        
-        def update_select(change, dataset):
-            dataset.select = change['new']
-
-        def update_color(change, dataset):
-            dataset.color = change['new']
-
-        for i, ds in enumerate(self.sets):
-            
-            chk = widgets.Checkbox(
-                value=ds.select, 
-                description=f"{i}: {ds.title}", 
-                indent=False, 
-                layout=widgets.Layout(width='300px')
-            )
-            
-            chk.observe(functools.partial(update_select, dataset=ds), names='value')
-            
-            details = widgets.Label(
-                value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", 
-                layout=widgets.Layout(width='200px')
-            )
-            
-            current_color = ds.color if isinstance(ds.color, str) else 'blue'
-            cp = widgets.ColorPicker(
-                concise=True, 
-                value=current_color, 
-                layout=widgets.Layout(width='30px')
-            )
-            
-            cp.observe(functools.partial(update_color, dataset=ds), names='value')
-
-            row = widgets.HBox([chk, cp, details])
-            items.append(row)
-            
-        self.dataset_widget_container.children = tuple(items)
-        
-
-    def gui(self):
-        """Displays the interactive dataset manager widgets."""
-        self._refresh_widgets()
-        
-        btn_refresh = widgets.Button(description="Refresh Data View")
-        btn_refresh.on_click(lambda b: self._refresh_widgets())
-        
-        display(widgets.VBox([btn_refresh, self.dataset_widget_container]))
