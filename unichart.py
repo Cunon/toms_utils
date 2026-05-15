@@ -8,12 +8,13 @@ from scipy.interpolate import interp1d
 import warnings
 import numbers
 import ipywidgets as widgets
-from IPython.display import display, clear_output
+from IPython.display import display, clear_output, HTML
 import re
 import inspect
 from scipy.interpolate import griddata
 import functools
 import gc
+from concurrent.futures import ThreadPoolExecutor
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -1144,15 +1145,19 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     return _show_or_return(fig, return_axes)
 
 
-def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
-                 bin_size=None, bin_start=None, bin_end=None, 
-                 histnorm='', barmode='overlay', opacity=0.7,
-                 color=None, suptitle=None, subplot_titles=None, darkmode=False, 
-                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
+def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
+                 bin_size=None, bin_start=None, bin_end=None,
+                 histnorm='', barmode='overlay', alpha=0.7,
+                 color=None, suptitle=None, subplot_titles=None, darkmode=False,
+                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False,
+                 opacity=None):
     """
     Create a unified histogram for a list of datasets.
     Subplots are organized by Variable (x).
     """
+    if opacity is not None:
+        warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+        alpha = opacity
     x_list = x if isinstance(x, list) else [x]
     n_x = len(x_list)
     nrows, ncols = _calc_grid(n_x, nrows, ncols)
@@ -1189,7 +1194,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1209,14 +1214,18 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     return _show_or_return(fig, return_axes)
 
-def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
+def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                             bin_size=None, bin_start=None, bin_end=None,
-                            histnorm='', barmode='overlay', opacity=0.7,
-                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
-                            darkmode=False, x_lim=None, return_axes=False):
+                            histnorm='', barmode='overlay', alpha=0.7,
+                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
+                            darkmode=False, x_lim=None, return_axes=False,
+                            opacity=None):
     """
     Create a unified histogram where Subplots are organized by Dataset.
     """
+    if opacity is not None:
+        warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+        alpha = opacity
     active_ds = [d for d in list_of_datasets if d.select]
     x_list = x if isinstance(x, list) else [x]
     n_sets = len(active_ds)
@@ -1263,7 +1272,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
                 name=xi,
                 legendgroup=xi,
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1859,7 +1868,9 @@ class UnichartNotebook:
         self.subplot_title_size = None
         self.colorbar_size = None
         self.hover_size = None
-        
+        self.table_header_size = None
+        self.table_cell_size = None
+
         print("UniChart Notebook Environment Initialized.")
 
     # ------------------------------------------------------------------
@@ -2017,8 +2028,39 @@ class UnichartNotebook:
         self._refresh_widgets()
 
     def query(self, uset_slice=None, query_str=None):
-        for ds in self._get_uset_slice(uset_slice):
-            ds.query = query_str
+        targets = list(self._get_uset_slice(uset_slice))
+        if not targets:
+            self._refresh_widgets()
+            return
+
+        if not query_str:
+            for ds in targets:
+                ds._query = query_str
+                ds._df_filtered = ds._df_full
+            self._refresh_widgets()
+            return
+
+        def _run(ds):
+            try:
+                return ds, ds._df_full.query(query_str), None
+            except Exception as e:
+                return ds, None, e
+
+        max_workers = min(len(targets), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(_run, targets))
+
+        for ds, result_df, err in results:
+            if err is not None:
+                raise ValueError(f"Query error: {err}")
+            ds._query = query_str
+            if not result_df.empty:
+                ds._df_filtered = result_df
+            else:
+                print(f"No data in set {ds.index} after query: {query_str}. Turning Set Off...")
+                ds.select = False
+                ds._df_filtered = ds._df_full
+
         self._refresh_widgets()
 
     # ------------------------------------------------------------------
@@ -2563,17 +2605,20 @@ class UnichartNotebook:
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
-    def highlight(self, column, range_tuple, color='yellow', opacity=0.2):
+    def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot."""
+        if opacity is not None:
+            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+            alpha = opacity
         if range_tuple == 'clear':
             if column == 'all':
                 self.highlights.clear()
             else:
                 self.highlights.pop(column, None)
             return
-            
+
         if column not in self.highlights: self.highlights[column] = []
-        self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
+        self.highlights[column].append({'range': range_tuple, 'color': color, 'alpha': alpha})
         
     def scale(self, column, range_tuple):
         """
@@ -2595,12 +2640,25 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def set_font_sizes(self, suptitle=None, legend=None, axes_title=None,
                     axes_tick=None, subplot_title=None, colorbar=None,
-                    hover=None, all=None, reset=False):
+                    hover=None, table_header=None, table_cell=None, all=None, reset=False):
         """
-        Configure font sizes for plot elements. Settings persist across plots.
+        Configure font sizes for plot and table elements. Settings persist across plots.
+
+        Parameters
+        ----------
+        suptitle, legend, axes_title, axes_tick, subplot_title, colorbar, hover : float or str
+            Font sizes for plot elements.
+        table_header : float or str
+            Font size for table header row.
+        table_cell : float or str
+            Font size for table cell content.
+        all : float or str
+            Set all font sizes at once (overridden by individual parameters).
+        reset : bool
+            Reset all font sizes to defaults.
         """
         keys = ('suptitle_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
-                'subplot_title_size', 'colorbar_size', 'hover_size')
+                'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
 
         if reset:
             for k in keys:
@@ -2633,6 +2691,8 @@ class UnichartNotebook:
             'subplot_title_size': _validate('subplot_title', subplot_title) if subplot_title is not None else base,
             'colorbar_size':      _validate('colorbar', colorbar)           if colorbar      is not None else base,
             'hover_size':         _validate('hover', hover)                 if hover         is not None else base,
+            'table_header_size':  _validate('table_header', table_header)   if table_header  is not None else base,
+            'table_cell_size':    _validate('table_cell', table_cell)       if table_cell    is not None else base,
         }
         for k, v in resolved.items():
             if v is not None:
@@ -2649,6 +2709,8 @@ class UnichartNotebook:
             'subplot_title':  getattr(self, 'subplot_title_size', None),
             'colorbar':       getattr(self, 'colorbar_size', None),
             'hover':          getattr(self, 'hover_size', None),
+            'table_header':   getattr(self, 'table_header_size', None),
+            'table_cell':     getattr(self, 'table_cell_size', None),
         }
 
     def _apply_fonts(self, fig):
@@ -2874,7 +2936,7 @@ class UnichartNotebook:
             if col == x:
                 for h in hls:
                     fig.add_vrect(x0=h['range'][0], x1=h['range'][1],
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
             elif col in yref_for:
                 yref = yref_for[col]
@@ -2882,7 +2944,7 @@ class UnichartNotebook:
                     fig.add_shape(type='rect', x0=0, x1=1,
                                   y0=h['range'][0], y1=h['range'][1],
                                   xref='paper', yref=yref,
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
 
         fig = self._apply_fonts(fig)
@@ -3067,13 +3129,17 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
-    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None, 
+    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
-                    histnorm='', barmode='overlay', opacity=0.7,
-                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                    histnorm='', barmode='overlay', alpha=0.7,
+                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False,
+                    opacity=None):
         """
         Unified interface for Histograms.
         """
+        if opacity is not None:
+            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+            alpha = opacity
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -3091,7 +3157,7 @@ class UnichartNotebook:
             fig = unihistogram_by_dataset(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -3101,7 +3167,7 @@ class UnichartNotebook:
             fig = unihistogram(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -3217,6 +3283,7 @@ class UnichartNotebook:
                 
             subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
             subset.insert(0, 'Dataset', ds.title)
+            subset.insert(0, 'Set', ds.index)
             combined_dfs.append(subset)
 
         if not combined_dfs:
@@ -3265,10 +3332,64 @@ class UnichartNotebook:
         }
         fig.update_layout(**layout_args)
 
-        fig = self._apply_fonts(fig)                    # <-- consistent with plot/bar/box
         self.last_fig = fig                             # <-- so save_png works
-        # fig.show()                                      # <-- the actual fix
-        return fig
+        fig = self._apply_fonts(fig)
+
+        display_df = final_df.copy()
+        for col in display_df.columns:
+            if display_df[col].dtype in ['float64', 'float32']:
+                display_df[col] = display_df[col].apply(lambda x: f"{x:.5g}" if isinstance(x, (int, float)) and x != '-' else x)
+
+        header_size = self.table_header_size or 22
+        cell_size = self.table_cell_size or 20
+        title_size = self.suptitle_size or header_size + 4
+
+        html_table = display_df.to_html(index=False, escape=False)
+        if title:
+            caption_html = (
+                f'<caption style="caption-side:top;text-align:center;'
+                f'font-weight:600;color:#000;font-size:{title_size}px;'
+                f'padding:6px 8px;background-color:#e8e8e8;'
+                f'border:1px solid #ccc;border-bottom:none;'
+                f'font-family:-apple-system, BlinkMacSystemFont, \'Segoe UI\', Arial, sans-serif;">'
+                f'{title}</caption>'
+            )
+            html_table = html_table.replace('<table', '<table', 1)
+            html_table = html_table.replace('>', f'>{caption_html}', 1)
+
+        styled_html = f"""
+        <div style="margin-top:8px; margin-bottom:8px; overflow-x:auto;">
+            {html_table}
+        </div>
+        <style>
+        table {{
+            border-collapse: collapse;
+            width: auto;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        }}
+        th {{
+            background-color: #e8e8e8;
+            color: #000;
+            font-weight: 600;
+            font-size: {header_size}px;
+            padding: 3px 8px;
+            text-align: center;
+            border: 1px solid #ccc;
+        }}
+        td {{
+            color: #000;
+            font-size: {cell_size}px;
+            padding: 2px 8px;
+            text-align: center;
+            border: 1px solid #ddd;
+        }}
+        tr:nth-child(odd) td {{ background-color: #ffffff; }}
+        tr:nth-child(even) td {{ background-color: #f3f3f3; }}
+        tr:hover td {{ background-color: #ececec; }}
+        </style>
+        """
+
+        display(HTML(styled_html))
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
@@ -3579,12 +3700,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
                                     xref=xref, yref=f'{yref} domain',
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -3596,12 +3717,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
                                     xref=f'{xref} domain', yref=yref,
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
         return fig
 
