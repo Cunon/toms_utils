@@ -10,7 +10,7 @@ the slider.
 Requirements: ``dash`` (in addition to plot_engine_stations' deps).
     pip install dash
 
-Quick start::
+Quick start (single view)::
 
     from engine_dashboard import create_dashboard
 
@@ -22,6 +22,22 @@ Quick start::
         x_col="time_s",
         plot_cols=["Tt_K", "Pt_kPa", "W_kgs", "Mach"],
         title="Transient Engine Simulation",
+    )
+    app.run(debug=True)
+
+Tabbed view::
+
+    app = create_dashboard(
+        image="engine.png",
+        df=df,
+        location_cols=location_cols,
+        label_col="time_s",
+        x_col="time_s",
+        tabs=[
+            {"label": "Pressures",   "plot_cols": ["Pt_kPa", "Pt_4_kPa"]},
+            {"label": "Temperatures","plot_cols": ["Tt_K", "Tt_4_K"]},
+            {"label": "Flow & Mach", "plot_cols": ["W_kgs", "Mach"]},
+        ],
     )
     app.run(debug=True)
 """
@@ -68,9 +84,11 @@ def create_dashboard(
     label_col: Optional[str] = None,
     x_col: Optional[str] = None,
     plot_cols: Optional[Sequence[str]] = None,
+    tabs: Optional[Sequence[dict]] = None,
     initial_row: int = 0,
     frame_duration: int = 800,
     width: int = 1400,
+    plot_layout: str = "right",
     **overlay_kwargs,
 ) -> Dash:
     """
@@ -80,8 +98,19 @@ def create_dashboard(
     Parameters
     ----------
     image, df, location_cols, label_col, x_col, plot_cols,
-    initial_row, frame_duration, width, **overlay_kwargs
-        Passed through to ``overlay_values_on_image``.
+    initial_row, frame_duration, width, plot_layout, **overlay_kwargs
+        Passed through to ``overlay_values_on_image``. ``plot_layout``
+        defaults to ``"right"`` so line plots render alongside the image.
+    tabs
+        Optional list of tab configs. Each is a dict like::
+
+            {"label": "Pressures",
+             "plot_cols": ["Pt_kPa", ...],
+             "location_cols": {...}}     # optional per-tab override
+
+        When provided, the figure section becomes a tabbed view with one
+        ``overlay_values_on_image`` figure per tab. ``location_cols`` and
+        ``plot_cols`` fall back to the top-level values if omitted.
     title
         Dashboard header title.
     subtitle
@@ -92,27 +121,46 @@ def create_dashboard(
     dash.Dash
         Run with ``app.run(debug=True)``.
     """
-    fig = overlay_values_on_image(
-        image=image,
-        df=df,
-        location_cols=location_cols,
-        label_col=label_col,
-        x_col=x_col,
-        plot_cols=plot_cols,
-        initial_row=initial_row,
-        frame_duration=frame_duration,
-        width=width,
-        **overlay_kwargs,
-    )
-
     app = Dash(__name__)
     app.title = title
 
     if subtitle is None:
         subtitle = f"{len(df):,} rows × {len(df.columns)} columns"
 
+    def _build_fig(tab_plot_cols, tab_location_cols):
+        return overlay_values_on_image(
+            image=image,
+            df=df,
+            location_cols=tab_location_cols,
+            label_col=label_col,
+            x_col=x_col,
+            plot_cols=tab_plot_cols,
+            initial_row=initial_row,
+            frame_duration=frame_duration,
+            width=width,
+            plot_layout=plot_layout,
+            **overlay_kwargs,
+        )
+
+    # Build either a single figure panel or a tabbed view.
+    if tabs:
+        figure_section = _build_tabs_section(
+            tabs=tabs,
+            default_plot_cols=plot_cols,
+            default_location_cols=location_cols,
+            build_fig=_build_fig,
+        )
+        # Summary panel uses the union of plot_cols across all tabs (or the
+        # top-level plot_cols if specified) so it covers everything visible.
+        summary_cols = _summary_cols_from_tabs(tabs, plot_cols, df)
+    else:
+        fig = _build_fig(plot_cols, location_cols)
+        figure_section = _figure_panel(fig, graph_id="main-figure")
+        summary_cols = (
+            list(plot_cols) if plot_cols else _default_summary_cols(df)
+        )
+
     label_steps = _slider_labels(df, label_col)
-    summary_cols = list(plot_cols) if plot_cols else _default_summary_cols(df)
 
     app.layout = html.Div(
         style={
@@ -133,7 +181,7 @@ def create_dashboard(
                     "alignItems": "start",
                 },
                 children=[
-                    _figure_panel(fig),
+                    figure_section,
                     html.Div(
                         style={
                             "display": "flex",
@@ -233,7 +281,7 @@ def _panel(title: str, body) -> html.Div:
     )
 
 
-def _figure_panel(fig) -> html.Div:
+def _figure_panel(fig, graph_id: str = "main-figure") -> html.Div:
     return html.Div(
         style={
             "backgroundColor": THEME["panel"],
@@ -243,7 +291,7 @@ def _figure_panel(fig) -> html.Div:
         },
         children=[
             dcc.Graph(
-                id="main-figure",
+                id=graph_id,
                 figure=fig,
                 config={
                     "displayModeBar": True,
@@ -254,6 +302,95 @@ def _figure_panel(fig) -> html.Div:
             )
         ],
     )
+
+
+def _build_tabs_section(
+    tabs: Sequence[dict],
+    default_plot_cols: Optional[Sequence[str]],
+    default_location_cols: Mapping[Coord, Sequence[str]],
+    build_fig,
+) -> html.Div:
+    """Render the figure section as a tabbed view, one figure per tab."""
+    tab_components = []
+    for i, tab in enumerate(tabs):
+        label = tab.get("label", f"Tab {i + 1}")
+        tab_plot_cols = tab.get("plot_cols", default_plot_cols)
+        tab_location_cols = tab.get("location_cols", default_location_cols)
+        fig = build_fig(tab_plot_cols, tab_location_cols)
+        tab_components.append(
+            dcc.Tab(
+                label=label,
+                value=f"tab-{i}",
+                style=_TAB_STYLE,
+                selected_style=_TAB_SELECTED_STYLE,
+                children=[
+                    _figure_panel(fig, graph_id=f"main-figure-{i}"),
+                ],
+            )
+        )
+
+    return html.Div(
+        style={
+            "backgroundColor": THEME["panel"],
+            "border": f"1px solid {THEME['panel_border']}",
+            "borderRadius": "8px",
+            "padding": "12px",
+        },
+        children=[
+            dcc.Tabs(
+                id="figure-tabs",
+                value="tab-0",
+                children=tab_components,
+                style={"marginBottom": "8px"},
+                parent_style={"backgroundColor": "transparent"},
+                colors={
+                    "border": THEME["panel_border"],
+                    "primary": THEME["accent"],
+                    "background": THEME["panel"],
+                },
+            )
+        ],
+    )
+
+
+def _summary_cols_from_tabs(
+    tabs: Sequence[dict],
+    default_plot_cols: Optional[Sequence[str]],
+    df: pd.DataFrame,
+) -> list:
+    """Union of every tab's plot_cols (preserves order, deduped)."""
+    seen = set()
+    out = []
+    for tab in tabs:
+        cols = tab.get("plot_cols") or default_plot_cols or []
+        for c in cols:
+            if c not in seen and c in df.columns:
+                seen.add(c)
+                out.append(c)
+    return out or _default_summary_cols(df)
+
+
+# Tab visual styles — kept module-level so both selected and idle tabs match
+# the dark theme. dcc.Tabs applies inline styles directly.
+_TAB_STYLE = {
+    "backgroundColor": THEME["bg"],
+    "color": THEME["text_muted"],
+    "border": f"1px solid {THEME['panel_border']}",
+    "borderBottom": "none",
+    "padding": "10px 16px",
+    "fontSize": "13px",
+    "fontWeight": 500,
+}
+
+_TAB_SELECTED_STYLE = {
+    "backgroundColor": THEME["panel"],
+    "color": THEME["text"],
+    "border": f"1px solid {THEME['panel_border']}",
+    "borderBottom": f"2px solid {THEME['accent']}",
+    "padding": "10px 16px",
+    "fontSize": "13px",
+    "fontWeight": 600,
+}
 
 
 def _row_picker(label_steps, initial_row: int) -> html.Div:
