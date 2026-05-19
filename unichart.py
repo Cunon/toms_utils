@@ -8,12 +8,13 @@ from scipy.interpolate import interp1d
 import warnings
 import numbers
 import ipywidgets as widgets
-from IPython.display import display, clear_output
+from IPython.display import display, clear_output, HTML
 import re
 import inspect
 from scipy.interpolate import griddata
 import functools
 import gc
+from concurrent.futures import ThreadPoolExecutor
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -594,9 +595,9 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
     for dataset in list_of_datasets:
         if not dataset.select: continue
-        
+
         base_df = dataset.df
-        
+
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
         cur_hue = fmt.get('hue') or hue
@@ -610,35 +611,44 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
+        base_cols = base_df.columns
+        cols_upper = None  # built lazily on first case-insensitive miss
+        valid_hover = [p for p in hover_parms if p in base_cols]
+        hue_in_cols = bool(cur_hue) and cur_hue in base_cols
+        ds_order = dataset.order
+        order_in_cols = bool(ds_order) and ds_order != 'index' and ds_order in base_cols
+        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
+        if ds_order == 'index':
+            sorted_base_df = sorted_base_df.sort_index()
+        elif order_in_cols:
+            sorted_base_df = sorted_base_df.sort_values(by=ds_order)
+        else:
+            sorted_base_df = sorted_base_df.sort_index()
+
         for idx_p, (x_name, yi) in enumerate(pairs):
             row = idx_p // ncols + 1
             col = idx_p % ncols + 1
 
-            if yi not in base_df.columns: continue
+            if yi not in base_cols: continue
 
-            if x_name not in base_df.columns:
-                cols_upper = {c.upper(): c for c in base_df.columns}
+            if x_name in base_cols:
+                x_col = x_name
+            else:
+                if cols_upper is None:
+                    cols_upper = {c.upper(): c for c in base_cols}
                 x_key = cols_upper.get(str(x_name).upper())
                 if not x_key: continue
                 x_col = x_key
-            else:
-                x_col = x_name
 
             req_cols = [x_col, yi]
-            if cur_hue and cur_hue in base_df.columns: req_cols.append(cur_hue)
-            valid_hover = [p for p in hover_parms if p in base_df.columns]
+            if hue_in_cols: req_cols.append(cur_hue)
             req_cols.extend(valid_hover)
-            if dataset.order and dataset.order != 'index' and dataset.order in base_df.columns:
-                req_cols.append(dataset.order)
-            
-            req_cols = list(dict.fromkeys(req_cols))
-            
-            valid_cols_mask = ~base_df.columns.duplicated()
-            df = base_df.loc[:, valid_cols_mask][req_cols]
+            if order_in_cols:
+                req_cols.append(ds_order)
 
-            if dataset.order == 'index': df = df.sort_index()
-            elif dataset.order: df = df.sort_values(by=dataset.order)
-            else: df = df.sort_index()
+            req_cols = list(dict.fromkeys(req_cols))
+
+            df = sorted_base_df[req_cols]
 
             custom_data_cols = []
             seen_cols = set()
@@ -880,27 +890,35 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
 
     return _show_or_return(fig, return_axes)
 
-def unibar(list_of_datasets, x, y, barmode='group', color=None, 
+def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
+           barmode='group', color=None, 
            suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
            darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
            y_lim=None, return_axes=False):
-    """
-    Grouped Bar Chart version of uniplot. 
-    Subplots are organized by Y-variables.
-    """
     y_list = y if isinstance(y, list) else [y]
+    markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
+    variable_formats = variable_formats or {}
     n_y = len(y_list)
     nrows, ncols = _calc_grid(n_y, nrows, ncols)
 
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Bar Comparison: {x}", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
+
+    edge_default = 'white' if darkmode else 'black'
+
+    # Track which (marker_col, y_subplot) legend entries we've already shown,
+    # for marker columns that are explicitly styled via var_format.
+    marker_legend_shown = set()
 
     for ds in list_of_datasets:
         if not ds.select: continue
         df = ds.df
+        offset_group = f"set_{ds.index}"
         
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -910,26 +928,77 @@ def unibar(list_of_datasets, x, y, barmode='group', color=None,
                 x=df[x], y=df[yi],
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
+                offsetgroup=offset_group,
+                alignmentgroup="bars",
                 marker_color=ds.color if not color else color,
                 opacity=ds.alpha,
-                showlegend=(idx_y == 0)
+                showlegend=(idx_y == 0)             # bars always get one legend entry per set
             ), row=row, col=col)
+
+            for m_idx, m_col in enumerate(markers_list):
+                if m_col not in df.columns: continue
+
+                var_fmt = variable_formats.get(m_col, {})
+                styled = bool(var_fmt)              # styled = has any var_format override
+
+                m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx + 1))
+                m_color  = var_fmt.get('color') or (color if color else ds.color)
+                m_size   = var_fmt.get('markersize', max(ds.markersize, 10))
+                m_alpha  = var_fmt.get('alpha', ds.alpha)
+
+                # Legend strategy:
+                #   styled marker      -> ONE entry per (marker_col, subplot), named just the column
+                #   unstyled marker    -> one entry per (dataset, marker_col), grouped with dataset
+                if styled:
+                    legend_key = (m_col, idx_y)
+                    show = legend_key not in marker_legend_shown
+                    if show:
+                        marker_legend_shown.add(legend_key)
+                    trace_name = m_col
+                    legend_group = f"marker_{m_col}"
+                else:
+                    show = (idx_y == 0)
+                    trace_name = f"{ds.index}: {ds.title} — {m_col}"
+                    legend_group = f"group_{ds.index}"
+
+                fig.add_trace(go.Scatter(
+                    x=df[x], y=df[m_col],
+                    mode='markers',
+                    name=trace_name,
+                    legendgroup=legend_group,
+                    offsetgroup=offset_group,
+                    alignmentgroup="bars",
+                    marker=dict(
+                        symbol=m_symbol,
+                        size=m_size,
+                        color=m_color,
+                        opacity=m_alpha,
+                        line=dict(width=1.5, color=edge_default),
+                    ),
+                    showlegend=show,
+                    hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x}}<br>"
+                                   f"{m_col}: %{{y:.4g}}<extra></extra>")
+                ), row=row, col=col)
 
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or "Value")
     if y_lim: fig.update_yaxes(range=y_lim)
 
     return _show_or_return(fig, return_axes)
-
-def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
+def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=None,
+                       barmode='group',
                        suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
                        darkmode=False, y_lim=None, return_axes=False):
     """
-    Grouped Bar Chart version of uniplot_per_dataset.
-    Subplots are organized by Dataset.
+    Grouped Bar Chart. Subplots are organized by Dataset.
+
+    variable_formats applies to BOTH bar variables and marker columns in
+    this view, since color encodes variable (not dataset) within each subplot.
     """
     active_ds = [d for d in list_of_datasets if d.select]
     y_list = y if isinstance(y, list) else [y]
+    markers_list = markers if isinstance(markers, list) else ([markers] if markers else [])
+    variable_formats = variable_formats or {}
     n_sets = len(active_ds)
     nrows, ncols = _calc_grid(n_sets, nrows, ncols)
 
@@ -937,8 +1006,12 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
     color_cycle = px.colors.qualitative.Plotly
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Bar Comparison", figsize,
-        barmode=barmode
+        barmode=barmode,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
+
+    edge_default = 'white' if darkmode else 'black'
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
@@ -946,13 +1019,46 @@ def unibar_per_dataset(list_of_datasets, x, y, barmode='group',
         
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
-            
+            offset_group = f"var_{yi}"
+
+            var_fmt = variable_formats.get(yi, {})
+            bar_color = var_fmt.get('color') or color_cycle[idx_y % len(color_cycle)]
+            bar_alpha = var_fmt.get('alpha', 1.0)
+
             fig.add_trace(go.Bar(
                 x=df[x], y=df[yi],
                 name=yi,
                 legendgroup=yi,
-                marker_color=color_cycle[idx_y % len(color_cycle)],
+                offsetgroup=offset_group,
+                alignmentgroup="bars",
+                marker_color=bar_color,
+                opacity=bar_alpha,
                 showlegend=(idx_ds == 0)
+            ), row=row, col=col)
+
+        for m_idx, m_col in enumerate(markers_list):
+            if m_col not in df.columns: continue
+
+            var_fmt = variable_formats.get(m_col, {})
+            m_symbol = get_plotly_marker(var_fmt.get('marker') or marker_map(m_idx))
+            m_color  = var_fmt.get('color') or color_cycle[(len(y_list) + m_idx) % len(color_cycle)]
+            m_size   = var_fmt.get('markersize', 12)
+            m_alpha  = var_fmt.get('alpha', 1.0)
+
+            fig.add_trace(go.Scatter(
+                x=df[x], y=df[m_col],
+                mode='markers',
+                name=m_col,
+                legendgroup=f"marker_{m_col}",
+                marker=dict(
+                    symbol=m_symbol,
+                    size=m_size,
+                    color=m_color,
+                    opacity=m_alpha,
+                    line=dict(width=1.5, color=edge_default),
+                ),
+                showlegend=(idx_ds == 0),
+                hovertemplate=f"<b>{m_col}</b><br>{x}: %{{x}}<br>%{{y:.4g}}<extra></extra>"
             ), row=row, col=col)
 
     fig.update_xaxes(title_text=x)
@@ -1048,15 +1154,19 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     return _show_or_return(fig, return_axes)
 
 
-def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
-                 bin_size=None, bin_start=None, bin_end=None, 
-                 histnorm='', barmode='overlay', opacity=0.7,
-                 color=None, suptitle=None, subplot_titles=None, darkmode=False, 
-                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False):
+def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
+                 bin_size=None, bin_start=None, bin_end=None,
+                 histnorm='', barmode='overlay', alpha=0.7,
+                 color=None, suptitle=None, subplot_titles=None, darkmode=False,
+                 figsize=(12, 8), ncols=None, nrows=None, x_lim=None, return_axes=False,
+                 opacity=None):
     """
     Create a unified histogram for a list of datasets.
     Subplots are organized by Variable (x).
     """
+    if opacity is not None:
+        warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+        alpha = opacity
     x_list = x if isinstance(x, list) else [x]
     n_x = len(x_list)
     nrows, ncols = _calc_grid(n_x, nrows, ncols)
@@ -1064,7 +1174,9 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or x_list)
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Distribution Comparison", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1091,7 +1203,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                 name=f"{ds.index}: {ds.title}",
                 legendgroup=f"group_{ds.index}",
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1111,14 +1223,18 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     return _show_or_return(fig, return_axes)
 
-def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None, 
+def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                             bin_size=None, bin_start=None, bin_end=None,
-                            histnorm='', barmode='overlay', opacity=0.7,
-                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
-                            darkmode=False, x_lim=None, return_axes=False):
+                            histnorm='', barmode='overlay', alpha=0.7,
+                            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
+                            darkmode=False, x_lim=None, return_axes=False,
+                            opacity=None):
     """
     Create a unified histogram where Subplots are organized by Dataset.
     """
+    if opacity is not None:
+        warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+        alpha = opacity
     active_ds = [d for d in list_of_datasets if d.select]
     x_list = x if isinstance(x, list) else [x]
     n_sets = len(active_ds)
@@ -1133,7 +1249,9 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
     color_cycle = px.colors.qualitative.Plotly
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Distribution Analysis", figsize,
-        barmode=barmode, showlegend=True
+        barmode=barmode, showlegend=True,
+        margin=dict(t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1163,7 +1281,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
                 name=xi,
                 legendgroup=xi,
                 marker_color=use_color,
-                opacity=opacity,
+                opacity=alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1452,7 +1570,8 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
         darkmode, suptitle or f"Variables by Dataset ({agg})", figsize,
         barmode='group',
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
-        margin=dict(r=50 + (extras_count * 80))
+        margin=dict(r=50 + (extras_count * 80), t=120),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
     ))
 
     return _show_or_return(fig, return_axes)
@@ -1604,28 +1723,30 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
     for ds in active:
         base_df = ds.df
-        if x not in base_df.columns:
+        base_cols = base_df.columns
+        if x not in base_cols:
             continue
 
         ds_hover = display_parms if display_parms is not None else getattr(ds, 'display_parms', [])
-        valid_hover = [p for p in (ds_hover or []) if p in base_df.columns]
+        valid_hover = [p for p in (ds_hover or []) if p in base_cols]
+
+        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
+        order_col = getattr(ds, 'order', None)
+        if order_col == 'index':
+            sorted_base_df = sorted_base_df.sort_index()
+        elif order_col and order_col in sorted_base_df.columns:
+            sorted_base_df = sorted_base_df.sort_values(by=order_col)
+        else:
+            sorted_base_df = sorted_base_df.sort_index()
 
         for idx_y, yi in enumerate(y_list):
-            if yi not in base_df.columns:
+            if yi not in base_cols:
                 continue
 
             fmt = _resolve_var_format(ds, yi, variable_formats)
 
             req_cols = list(dict.fromkeys([x, yi] + valid_hover))
-            df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
-
-            order_col = getattr(ds, 'order', None)
-            if order_col == 'index':
-                df = df.sort_index()
-            elif order_col and order_col in df.columns:
-                df = df.sort_values(by=order_col)
-            else:
-                df = df.sort_index()
+            df = sorted_base_df[req_cols]
 
             parts = []
             if fmt['linestyle']:
@@ -1721,8 +1842,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 class UnichartNotebook:
     def __init__(self):
         self.sets = []
-        self.dataset_widget_container = widgets.VBox([])
-        
+
         # State Memory
         self.last_x = None
         self.last_y = None
@@ -1758,7 +1878,9 @@ class UnichartNotebook:
         self.subplot_title_size = None
         self.colorbar_size = None
         self.hover_size = None
-        
+        self.table_header_size = None
+        self.table_cell_size = None
+
         print("UniChart Notebook Environment Initialized.")
 
     # ------------------------------------------------------------------
@@ -1824,8 +1946,6 @@ class UnichartNotebook:
                     exec(f"{column} = '{column}'", globals())
                 except Exception as e:
                     print(f"Could not create variable for column '{column}': {e}")
-        
-        self._refresh_widgets()
 
     def load_clipboard(self, **kwargs):
         """Quickly load data from system clipboard."""
@@ -1837,7 +1957,6 @@ class UnichartNotebook:
 
     def clear_data(self):
         self.sets = []
-        self._refresh_widgets()
         print("All datasets cleared.")
 
     def set_title(self, uset_slice, title):
@@ -1847,7 +1966,6 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds.title = str(title)
             ds.title_format = f"{ds.title} {ds.index}"
-        self._refresh_widgets()
 
     # ------------------------------------------------------------------
     # Selection & Filtering
@@ -1898,7 +2016,6 @@ class UnichartNotebook:
         for ds in self.sets: ds.select = False
         for ds in self._get_uset_slice(uset_slice):
             ds.select = True
-        self._refresh_widgets()
 
     def selected(self):
         """Get the currently selected datasets."""
@@ -1907,18 +2024,43 @@ class UnichartNotebook:
     def omit(self, uset_slice=None):
         for ds in self._get_uset_slice(uset_slice):
             ds.select = False
-        self._refresh_widgets()
 
     def restore(self, uset_slice=None):
         targets = self.sets if uset_slice == "all" else self._get_uset_slice(uset_slice)
         for ds in targets:
             ds.select = True
-        self._refresh_widgets()
 
     def query(self, uset_slice=None, query_str=None):
-        for ds in self._get_uset_slice(uset_slice):
-            ds.query = query_str
-        self._refresh_widgets()
+        targets = list(self._get_uset_slice(uset_slice))
+        if not targets:
+            return
+
+        if not query_str:
+            for ds in targets:
+                ds._query = query_str
+                ds._df_filtered = ds._df_full
+            return
+
+        def _run(ds):
+            try:
+                return ds, ds._df_full.query(query_str), None
+            except Exception as e:
+                return ds, None, e
+
+        max_workers = min(len(targets), 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = list(ex.map(_run, targets))
+
+        for ds, result_df, err in results:
+            if err is not None:
+                raise ValueError(f"Query error: {err}")
+            ds._query = query_str
+            if not result_df.empty:
+                ds._df_filtered = result_df
+            else:
+                print(f"No data in set {ds.index} after query: {query_str}. Turning Set Off...")
+                ds.select = False
+                ds._df_filtered = ds._df_full
 
     # ------------------------------------------------------------------
     # Styling
@@ -2406,7 +2548,6 @@ class UnichartNotebook:
             print(f"Loaded Set {next_index}: {new_title}")
             created.append(ds)
 
-        self._refresh_widgets()
         return created
 
     def combine_sets(self, uset_slice, title=None, ignore_index=True):
@@ -2443,7 +2584,6 @@ class UnichartNotebook:
         new_ds = Dataset(combined, index=next_index, title=new_title)
         self.sets.append(new_ds)
         print(f"Loaded Set {next_index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
-        self._refresh_widgets()
         return new_ds
 
     # ------------------------------------------------------------------
@@ -2462,17 +2602,20 @@ class UnichartNotebook:
         plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
-    def highlight(self, column, range_tuple, color='yellow', opacity=0.2):
+    def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
         """Add a highlighted region to the next plot."""
+        if opacity is not None:
+            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+            alpha = opacity
         if range_tuple == 'clear':
             if column == 'all':
                 self.highlights.clear()
             else:
                 self.highlights.pop(column, None)
             return
-            
+
         if column not in self.highlights: self.highlights[column] = []
-        self.highlights[column].append({'range': range_tuple, 'color': color, 'opacity': opacity})
+        self.highlights[column].append({'range': range_tuple, 'color': color, 'alpha': alpha})
         
     def scale(self, column, range_tuple):
         """
@@ -2494,12 +2637,25 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def set_font_sizes(self, suptitle=None, legend=None, axes_title=None,
                     axes_tick=None, subplot_title=None, colorbar=None,
-                    hover=None, all=None, reset=False):
+                    hover=None, table_header=None, table_cell=None, all=None, reset=False):
         """
-        Configure font sizes for plot elements. Settings persist across plots.
+        Configure font sizes for plot and table elements. Settings persist across plots.
+
+        Parameters
+        ----------
+        suptitle, legend, axes_title, axes_tick, subplot_title, colorbar, hover : float or str
+            Font sizes for plot elements.
+        table_header : float or str
+            Font size for table header row.
+        table_cell : float or str
+            Font size for table cell content.
+        all : float or str
+            Set all font sizes at once (overridden by individual parameters).
+        reset : bool
+            Reset all font sizes to defaults.
         """
         keys = ('suptitle_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
-                'subplot_title_size', 'colorbar_size', 'hover_size')
+                'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
 
         if reset:
             for k in keys:
@@ -2532,6 +2688,8 @@ class UnichartNotebook:
             'subplot_title_size': _validate('subplot_title', subplot_title) if subplot_title is not None else base,
             'colorbar_size':      _validate('colorbar', colorbar)           if colorbar      is not None else base,
             'hover_size':         _validate('hover', hover)                 if hover         is not None else base,
+            'table_header_size':  _validate('table_header', table_header)   if table_header  is not None else base,
+            'table_cell_size':    _validate('table_cell', table_cell)       if table_cell    is not None else base,
         }
         for k, v in resolved.items():
             if v is not None:
@@ -2548,6 +2706,8 @@ class UnichartNotebook:
             'subplot_title':  getattr(self, 'subplot_title_size', None),
             'colorbar':       getattr(self, 'colorbar_size', None),
             'hover':          getattr(self, 'hover_size', None),
+            'table_header':   getattr(self, 'table_header_size', None),
+            'table_cell':     getattr(self, 'table_cell_size', None),
         }
 
     def _apply_fonts(self, fig):
@@ -2773,7 +2933,7 @@ class UnichartNotebook:
             if col == x:
                 for h in hls:
                     fig.add_vrect(x0=h['range'][0], x1=h['range'][1],
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
             elif col in yref_for:
                 yref = yref_for[col]
@@ -2781,7 +2941,7 @@ class UnichartNotebook:
                     fig.add_shape(type='rect', x0=0, x1=1,
                                   y0=h['range'][0], y1=h['range'][1],
                                   xref='paper', yref=yref,
-                                  fillcolor=h['color'], opacity=h['opacity'],
+                                  fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
 
         fig = self._apply_fonts(fig)
@@ -2793,9 +2953,14 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-    def bar(self, x=None, y=None, by='vars', barmode='group', agg='mean', figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+    def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
+            figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
+
+        Marker overlay formatting is controlled via `var_format`. Examples:
+            nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
+            nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
         """
         self._clear_last_fig()
 
@@ -2806,6 +2971,8 @@ class UnichartNotebook:
         y_list = y if isinstance(y, list) else [y]
 
         if by == 'dataset_x':
+            if markers:
+                print("Warning: `markers` is not supported with by='dataset_x'.")
             fig = unibar_datasets_as_x(
                 list_of_datasets=self.sets, y=y_list, agg=agg,
                 suptitle=self.suptitle, figsize=figsize, 
@@ -2821,17 +2988,21 @@ class UnichartNotebook:
             
         elif by in ['sets', 'datasets']:
             fig = unibar_per_dataset(
-                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, markers=markers,
+                variable_formats=self.variable_formats,         # <-- pass through
+                barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
         else:
             fig = unibar(
-                list_of_datasets=self.sets, x=x, y=y, barmode=barmode,
+                list_of_datasets=self.sets, x=x, y=y, markers=markers,
+                variable_formats=self.variable_formats,         # <-- pass through
+                barmode=barmode,
                 suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
-            
+
         if fig:
             if x in self.axis_limits:
                 fig.update_xaxes(range=self.axis_limits[x])
@@ -2955,13 +3126,17 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
-    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None, 
+    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
-                    histnorm='', barmode='overlay', opacity=0.7,
-                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                    histnorm='', barmode='overlay', alpha=0.7,
+                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False,
+                    opacity=None):
         """
         Unified interface for Histograms.
         """
+        if opacity is not None:
+            warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
+            alpha = opacity
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -2979,7 +3154,7 @@ class UnichartNotebook:
             fig = unihistogram_by_dataset(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -2989,7 +3164,7 @@ class UnichartNotebook:
             fig = unihistogram(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, opacity=opacity, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -3103,8 +3278,9 @@ class UnichartNotebook:
             if not valid_cols:
                 continue
                 
-            subset = ds.df[valid_cols]
+            subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
             subset.insert(0, 'Dataset', ds.title)
+            subset.insert(0, 'Set', ds.index)
             combined_dfs.append(subset)
 
         if not combined_dfs:
@@ -3125,12 +3301,15 @@ class UnichartNotebook:
             font_color = 'black'
             line_color = 'rgb(200, 200, 200)'
 
+        # Bold header text via HTML — works in all Plotly versions
+        header_values = [f"<b>{c}</b>" for c in final_df.columns]
+
         fig = go.Figure(data=[go.Table(
             header=dict(
-                values=list(final_df.columns),
+                values=header_values,
                 fill_color=header_color,
                 align='left',
-                font=dict(color=font_color, size=12, weight='bold'),
+                font=dict(color=font_color, size=12),     # <-- removed weight='bold'
                 line_color=line_color
             ),
             cells=dict(
@@ -3149,6 +3328,65 @@ class UnichartNotebook:
             'margin': dict(l=20, r=20, t=50, b=20),
         }
         fig.update_layout(**layout_args)
+
+        self.last_fig = fig                             # <-- so save_png works
+        fig = self._apply_fonts(fig)
+
+        display_df = final_df.copy()
+        for col in display_df.columns:
+            if display_df[col].dtype in ['float64', 'float32']:
+                display_df[col] = display_df[col].apply(lambda x: f"{x:.5g}" if isinstance(x, (int, float)) and x != '-' else x)
+
+        header_size = self.table_header_size or 22
+        cell_size = self.table_cell_size or 20
+        title_size = self.suptitle_size or header_size + 4
+
+        html_table = display_df.to_html(index=False, escape=False)
+        if title:
+            caption_html = (
+                f'<caption style="caption-side:top;text-align:center;'
+                f'font-weight:600;color:#000;font-size:{title_size}px;'
+                f'padding:6px 8px;background-color:#e8e8e8;'
+                f'border:1px solid #ccc;border-bottom:none;'
+                f'font-family:-apple-system, BlinkMacSystemFont, \'Segoe UI\', Arial, sans-serif;">'
+                f'{title}</caption>'
+            )
+            html_table = html_table.replace('<table', '<table', 1)
+            html_table = html_table.replace('>', f'>{caption_html}', 1)
+
+        styled_html = f"""
+        <div style="margin-top:8px; margin-bottom:8px; overflow-x:auto;">
+            {html_table}
+        </div>
+        <style>
+        table {{
+            border-collapse: collapse;
+            width: auto;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        }}
+        th {{
+            background-color: #e8e8e8;
+            color: #000;
+            font-weight: 600;
+            font-size: {header_size}px;
+            padding: 3px 8px;
+            text-align: center;
+            border: 1px solid #ccc;
+        }}
+        td {{
+            color: #000;
+            font-size: {cell_size}px;
+            padding: 2px 8px;
+            text-align: center;
+            border: 1px solid #ddd;
+        }}
+        tr:nth-child(odd) td {{ background-color: #ffffff; }}
+        tr:nth-child(even) td {{ background-color: #f3f3f3; }}
+        tr:hover td {{ background-color: #ececec; }}
+        </style>
+        """
+
+        display(HTML(styled_html))
 
     def save_png(self, filename="plot.png", scale=3, width=None, height=None):
         """
@@ -3459,12 +3697,12 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=h['range'][0], x1=h['range'][1], y0=0, y1=1,
                                     xref=xref, yref=f'{yref} domain',
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_vrect(x0=h['range'][0], x1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
             if col_name in y_list:
                 if mode == 'vars' and plot_items:
@@ -3476,69 +3714,11 @@ class UnichartNotebook:
                                 fig.add_shape(
                                     type='rect', x0=0, x1=1, y0=h['range'][0], y1=h['range'][1],
                                     xref=f'{xref} domain', yref=yref,
-                                    fillcolor=h['color'], opacity=h['opacity'], layer='below', line_width=0
+                                    fillcolor=h['color'], opacity=h['alpha'], layer='below', line_width=0
                                 )
                 else:
                     for h in hls:
                         fig.add_hrect(y0=h['range'][0], y1=h['range'][1], fillcolor=h['color'],
-                                      opacity=h['opacity'], layer='below', line_width=0)
+                                      opacity=h['alpha'], layer='below', line_width=0)
 
         return fig
-
-    def _refresh_widgets(self):
-        """Rebuild the dataset widget list, closing old widgets first to avoid memory leaks."""
-        if hasattr(self, 'dataset_widget_container') and self.dataset_widget_container.children:
-            for child in self.dataset_widget_container.children:
-                if hasattr(child, 'children'):
-                    for sub_child in child.children:
-                        sub_child.close()
-                child.close()
-                
-        items = []
-        items.append(widgets.HTML("<b>Dataset Manager</b>"))
-        
-        def update_select(change, dataset):
-            dataset.select = change['new']
-
-        def update_color(change, dataset):
-            dataset.color = change['new']
-
-        for i, ds in enumerate(self.sets):
-            
-            chk = widgets.Checkbox(
-                value=ds.select, 
-                description=f"{i}: {ds.title}", 
-                indent=False, 
-                layout=widgets.Layout(width='300px')
-            )
-            
-            chk.observe(functools.partial(update_select, dataset=ds), names='value')
-            
-            details = widgets.Label(
-                value=f"[Rows: {len(ds.df)}] [Query: {ds.query}]", 
-                layout=widgets.Layout(width='200px')
-            )
-            
-            current_color = ds.color if isinstance(ds.color, str) else 'blue'
-            cp = widgets.ColorPicker(
-                concise=True, 
-                value=current_color, 
-                layout=widgets.Layout(width='30px')
-            )
-            
-            cp.observe(functools.partial(update_color, dataset=ds), names='value')
-
-            row = widgets.HBox([chk, cp, details])
-            items.append(row)
-            
-        self.dataset_widget_container.children = tuple(items)
-        
-
-    def gui(self):
-        """Displays the interactive dataset manager widgets."""
-        self._refresh_widgets()
-        
-        btn_refresh = widgets.Button(description="Refresh Data View")
-        btn_refresh.on_click(lambda b: self._refresh_widgets())
-        
-        display(widgets.VBox([btn_refresh, self.dataset_widget_container]))
