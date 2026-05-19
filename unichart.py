@@ -14,7 +14,6 @@ import inspect
 from scipy.interpolate import griddata
 import functools
 import gc
-from concurrent.futures import ThreadPoolExecutor
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -188,28 +187,102 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
 # Dataset Class
 # -----------------------------------------------------------------------------
 
-class Dataset:
-    """Stores a DataFrame and the visual/formatting attributes used when plotting it."""
+_SET_ID_COL = '_SET_ID'
 
-    def __init__(self, df, index=0, title=None, display_parms=None):
-        self._df_full = df
-        self._df_filtered = df
-        self.query = None
+
+class _DatasetFrameView:
+    """Mutable per-set view onto a UnichartNotebook's combined DataFrame.
+
+    Reads return a per-set slice (with _SET_ID hidden). Writes scatter values
+    back into the combined frame, NaN-filling other sets when a new column is
+    introduced. Exists so that legacy `ds._df_full[col] = values` patterns
+    continue to work after the storage refactor.
+    """
+
+    def __init__(self, dataset):
+        self._dataset = dataset
+
+    def _slice(self):
+        cdf = self._dataset._notebook._combined_df
+        rows = cdf.loc[cdf[_SET_ID_COL] == self._dataset._set_id]
+        return rows.drop(columns=_SET_ID_COL, errors='ignore')
+
+    def __getitem__(self, key):
+        return self._slice()[key]
+
+    def __setitem__(self, key, value):
+        notebook = self._dataset._notebook
+        cdf = notebook._combined_df
+        mask = (cdf[_SET_ID_COL] == self._dataset._set_id)
+        if key not in cdf.columns:
+            cdf[key] = pd.NA
+        if hasattr(value, '__len__') and not isinstance(value, str):
+            n = int(mask.sum())
+            if len(value) != n:
+                raise ValueError(
+                    f"Length mismatch assigning '{key}' to set "
+                    f"{self._dataset.index}: {len(value)} values for {n} rows.")
+            cdf.loc[mask, key] = list(value)
+        else:
+            cdf.loc[mask, key] = value
+        notebook._reapply_all_queries()
+
+    @property
+    def columns(self):
+        return self._slice().columns
+
+    @property
+    def index(self):
+        return self._slice().index
+
+    @property
+    def empty(self):
+        return self._slice().empty
+
+    def __len__(self):
+        return len(self._slice())
+
+    def __repr__(self):
+        return repr(self._slice())
+
+    def __getattr__(self, name):
+        return getattr(self._slice(), name)
+
+
+class Dataset:
+    """Façade over a slice of a UnichartNotebook's combined DataFrame.
+
+    Holds only formatting/state attributes plus a reference to the parent
+    notebook and an internal set id. The actual row data lives in
+    `notebook._combined_df`, keyed by the `_SET_ID` column.
+    """
+
+    def __init__(self, notebook, set_id, index=0, title=None, display_parms=None):
+        if not hasattr(notebook, '_combined_df'):
+            raise TypeError(
+                "Dataset must be constructed by a UnichartNotebook; "
+                "use UnichartNotebook.load_df(df, ...) instead.")
+        self._notebook = notebook
+        self._set_id = set_id
+        self._query = None
+        self._query_mask = None
         self._select = True
-        
+
         if title:
             self.title = title
-        elif "TITLE" in df.columns:
-            self.title = str(df["TITLE"].iloc[0])
         else:
-            self.title = "Untitled"
-            
+            raw = self._raw_df()
+            if "TITLE" in raw.columns and not raw["TITLE"].empty:
+                self.title = str(raw["TITLE"].iloc[0])
+            else:
+                self.title = "Untitled"
+
         self.index = index
         self.title_format = f"{self.title} {index}"
-        
+
         default_colors = px.colors.qualitative.Plotly
         self._color = default_colors[index % len(default_colors)]
-        
+
         self._marker = marker_map(index)
         self._edge_color = "black"
         self._linestyle = None
@@ -230,24 +303,46 @@ class Dataset:
         self._plot_type = 'scatter'
         self._order = None
 
+    def _raw_df(self):
+        """All rows for this set, unmasked, with _SET_ID stripped."""
+        cdf = self._notebook._combined_df
+        rows = cdf.loc[cdf[_SET_ID_COL] == self._set_id]
+        return rows.drop(columns=_SET_ID_COL, errors='ignore')
+
     @property
     def order(self):
         return self._order
 
     @order.setter
     def order(self, value):
-        if (value in self._df_full.columns) or (value is None):
+        if value is None or value in self._raw_df().columns:
             self._order = value
         else:
             raise ValueError(f"Invalid order column: {value}")
 
     @property
     def df(self):
-        return self._df_filtered
+        cdf = self._notebook._combined_df
+        set_mask = (cdf[_SET_ID_COL] == self._set_id)
+        if self._query_mask is not None:
+            qm = self._query_mask.reindex(cdf.index, fill_value=False)
+            rows = cdf.loc[set_mask & qm]
+        else:
+            rows = cdf.loc[set_mask]
+        return rows.drop(columns=_SET_ID_COL, errors='ignore')
 
     @df.setter
     def df(self, value):
-        self._df_full = value
+        self._notebook._replace_set_rows(self._set_id, value)
+        self._apply_query()
+
+    @property
+    def _df_full(self):
+        return _DatasetFrameView(self)
+
+    @_df_full.setter
+    def _df_full(self, value):
+        self._notebook._replace_set_rows(self._set_id, value)
         self._apply_query()
 
     @property
@@ -260,19 +355,23 @@ class Dataset:
         self._apply_query()
 
     def _apply_query(self):
+        cdf = self._notebook._combined_df
         if not self._query:
-            self._df_filtered = self._df_full
-        else:
-            try:
-                result_df = self._df_full.query(self._query)
-                if not result_df.empty:
-                    self._df_filtered = result_df
-                else:
-                    print(f"No data in set {self.index} after query: {self._query}. Turning Set Off...")
-                    self.select = False
-                    self._df_filtered = self._df_full
-            except Exception as e:
-                raise ValueError(f"Query error: {e}")
+            self._query_mask = None
+            return
+        set_rows = cdf.loc[cdf[_SET_ID_COL] == self._set_id]
+        try:
+            filtered = set_rows.query(self._query)
+        except Exception as e:
+            raise ValueError(f"Query error: {e}")
+        if filtered.empty:
+            print(f"No data in set {self.index} after query: {self._query}. Turning Set Off...")
+            self._select = False
+            self._query_mask = None
+            return
+        mask = pd.Series(False, index=cdf.index)
+        mask.loc[filtered.index] = True
+        self._query_mask = mask
 
     @property
     def color(self): return self._color
@@ -1842,6 +1941,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 class UnichartNotebook:
     def __init__(self):
         self.sets = []
+        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='Int64')})
+        self._next_set_id = 0
 
         # State Memory
         self.last_x = None
@@ -1897,8 +1998,56 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Data Management
     # ------------------------------------------------------------------
+    def _register_set(self, df, title):
+        """Append a new set to the combined frame and create the façade Dataset.
+
+        Outer-concats so missing columns are NaN-filled in either direction.
+        Returns the new Dataset.
+        """
+        if _SET_ID_COL in df.columns:
+            df = df.drop(columns=_SET_ID_COL)
+
+        set_id = self._next_set_id
+        self._next_set_id += 1
+
+        tagged = df.copy()
+        tagged[_SET_ID_COL] = set_id
+
+        if self._combined_df.empty:
+            self._combined_df = tagged.reset_index(drop=True)
+        else:
+            self._combined_df = pd.concat(
+                [self._combined_df, tagged], ignore_index=True, sort=False
+            )
+
+        next_index = len(self.sets)
+        ds = Dataset(self, set_id, index=next_index, title=title)
+        self.sets.append(ds)
+        self._reapply_all_queries()
+        return ds
+
+    def _reapply_all_queries(self):
+        """Recompute every dataset's query mask. Call after combined-frame mutations."""
+        for ds in self.sets:
+            ds._apply_query()
+
+    def _replace_set_rows(self, set_id, new_df):
+        """Replace all rows belonging to set_id with new_df (re-tagged with the same id)."""
+        cdf = self._combined_df
+        kept = cdf.loc[cdf[_SET_ID_COL] != set_id]
+        if _SET_ID_COL in new_df.columns:
+            new_df = new_df.drop(columns=_SET_ID_COL)
+        tagged = new_df.copy()
+        tagged[_SET_ID_COL] = set_id
+        if kept.empty:
+            self._combined_df = tagged.reset_index(drop=True)
+        else:
+            self._combined_df = pd.concat([kept, tagged], ignore_index=True, sort=False)
+
     def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
         """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one."""
+        df = df.copy()
+
         if not title:
             if set_name_column and set_name_column in df.columns:
                 pass
@@ -1917,11 +2066,8 @@ class UnichartNotebook:
             else:
                 df["SETNUMBER"] = df.index
 
-        next_index = len(self.sets)
-        
         if set_idx_column and set_idx_column in df.columns:
             for set_index, df_subset in df.groupby(set_idx_column):
-
                 if title:
                     final_title = title
                 elif set_name_column and set_name_column in df_subset.columns:
@@ -1931,14 +2077,11 @@ class UnichartNotebook:
                 else:
                     final_title = f"Group {set_index}"
 
-                ds = Dataset(df_subset.copy(), index=next_index, title=final_title)
-                self.sets.append(ds)
-                print(f"Loaded Set {next_index}: {ds.title}")
-                next_index += 1
+                ds = self._register_set(df_subset, final_title)
+                print(f"Loaded Set {ds.index}: {ds.title}")
         else:
-            ds = Dataset(df.copy(), index=next_index, title=title if title else "Untitled")
-            self.sets.append(ds)
-            print(f"Loaded Set {next_index}: {ds.title}")
+            ds = self._register_set(df, title if title else "Untitled")
+            print(f"Loaded Set {ds.index}: {ds.title}")
 
         if load_cols_as_vars:
             for column in df.columns:
@@ -1957,7 +2100,74 @@ class UnichartNotebook:
 
     def clear_data(self):
         self.sets = []
+        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='Int64')})
+        self._next_set_id = 0
         print("All datasets cleared.")
+
+    # ------------------------------------------------------------------
+    # Combined-frame bulk operations
+    # ------------------------------------------------------------------
+    @property
+    def df(self):
+        """The combined DataFrame across all sets (with the _SET_ID column visible).
+
+        Returned live — mutations affect plotting. Prefer `add_column` /
+        `set_column` for safe writes; they reapply per-set query masks.
+        """
+        return self._combined_df
+
+    def add_column(self, name, value):
+        """Add or replace a column on the combined frame across all sets.
+
+        `value` may be a scalar, a Series aligned to the combined frame's index,
+        or a callable receiving the combined frame and returning either.
+        """
+        if callable(value):
+            value = value(self._combined_df)
+        self._combined_df[name] = value
+        self._reapply_all_queries()
+
+    def set_column(self, uset_slice, col, value):
+        """Write `value` into `col` for the selected sets only.
+
+        Adds the column (NaN-filled elsewhere) if it doesn't exist. `value` may
+        be a scalar or an array-like aligned to the total number of selected rows.
+        """
+        targets = self._get_uset_slice(uset_slice)
+        if not targets:
+            return
+        target_ids = {ds._set_id for ds in targets}
+        cdf = self._combined_df
+        mask = cdf[_SET_ID_COL].isin(target_ids)
+        if col not in cdf.columns:
+            cdf[col] = pd.NA
+        if hasattr(value, '__len__') and not isinstance(value, str):
+            n = int(mask.sum())
+            if len(value) != n:
+                raise ValueError(
+                    f"Length mismatch assigning '{col}': {len(value)} values for {n} rows.")
+            cdf.loc[mask, col] = list(value)
+        else:
+            cdf.loc[mask, col] = value
+        self._reapply_all_queries()
+
+    def set_color_palette(self, palette, uset_slice='all'):
+        """Recolor the selected sets using a Plotly qualitative palette name or color list."""
+        targets = self._get_uset_slice(uset_slice)
+        if not targets:
+            return
+        if isinstance(palette, str):
+            try:
+                colors = getattr(px.colors.qualitative, palette)
+            except AttributeError:
+                try:
+                    colors = pcolors.sample_colorscale(palette, len(targets))
+                except Exception as e:
+                    raise ValueError(f"Unknown palette: {palette!r} ({e})")
+        else:
+            colors = list(palette)
+        for i, ds in enumerate(targets):
+            ds.color = colors[i % len(colors)]
 
     def set_title(self, uset_slice, title):
         """
@@ -2037,30 +2247,31 @@ class UnichartNotebook:
 
         if not query_str:
             for ds in targets:
-                ds._query = query_str
-                ds._df_filtered = ds._df_full
+                ds._query = None
+                ds._query_mask = None
             return
 
-        def _run(ds):
-            try:
-                return ds, ds._df_full.query(query_str), None
-            except Exception as e:
-                return ds, None, e
+        cdf = self._combined_df
+        target_ids = {ds._set_id for ds in targets}
+        set_mask = cdf[_SET_ID_COL].isin(target_ids)
+        subset = cdf.loc[set_mask]
+        try:
+            filtered = subset.query(query_str)
+        except Exception as e:
+            raise ValueError(f"Query error: {e}")
 
-        max_workers = min(len(targets), 8)
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            results = list(ex.map(_run, targets))
-
-        for ds, result_df, err in results:
-            if err is not None:
-                raise ValueError(f"Query error: {err}")
+        kept_by_set = filtered.groupby(_SET_ID_COL, sort=False).groups
+        for ds in targets:
             ds._query = query_str
-            if not result_df.empty:
-                ds._df_filtered = result_df
-            else:
+            keep_idx = kept_by_set.get(ds._set_id)
+            if keep_idx is None or len(keep_idx) == 0:
                 print(f"No data in set {ds.index} after query: {query_str}. Turning Set Off...")
-                ds.select = False
-                ds._df_filtered = ds._df_full
+                ds._select = False
+                ds._query_mask = None
+                continue
+            mask = pd.Series(False, index=cdf.index)
+            mask.loc[keep_idx] = True
+            ds._query_mask = mask
 
     # ------------------------------------------------------------------
     # Styling
@@ -2541,11 +2752,9 @@ class UnichartNotebook:
                       f"(large alignment gaps; consider tolerance= or a different direction=).")
 
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
-            next_index = len(self.sets)
-            ds = Dataset(result, index=next_index, title=new_title)
+            ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
-            self.sets.append(ds)
-            print(f"Loaded Set {next_index}: {new_title}")
+            print(f"Loaded Set {ds.index}: {new_title}")
             created.append(ds)
 
         return created
@@ -2580,10 +2789,8 @@ class UnichartNotebook:
 
         idx_str = '-'.join(str(ds.index) for ds in sources)
         new_title = title or f"Combined {idx_str}"
-        next_index = len(self.sets)
-        new_ds = Dataset(combined, index=next_index, title=new_title)
-        self.sets.append(new_ds)
-        print(f"Loaded Set {next_index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
+        new_ds = self._register_set(combined, new_title)
+        print(f"Loaded Set {new_ds.index}: {new_title} ({len(combined)} rows from {len(sources)} datasets)")
         return new_ds
 
     # ------------------------------------------------------------------
