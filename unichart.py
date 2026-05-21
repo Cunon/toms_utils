@@ -2611,11 +2611,14 @@ class UnichartNotebook:
             result[ds.index] = {'raw': raw, 'kind': kind, 'param': param, 'label': label, 'formula': formula, 'stats': stats}
 
         any_reg = any(v['kind'] is not None for v in result.values())
+        xy_header = f"Regression info for y='{y_col}' vs x='{x_col}':" if (x_col and y_col) \
+            else "Regression info (no prior x/y columns set):"
+        print(xy_header)
         for idx, info in result.items():
             ds = self.sets[idx]
             reg_str = info['label'] or "None"
             formula_str = f"  →  {info['formula']}" if info['formula'] else ""
-            print(f"Set {idx} ({ds.title}): {reg_str}{formula_str}")
+            print(f"Set {idx} ({ds.title}) [y='{y_col}' vs x='{x_col}']: {reg_str}{formula_str}")
             if info['stats']:
                 s = info['stats']
                 r2_str = f"R²={s['r2']:.4f}" if s['r2'] is not None else "R²=N/A"
@@ -3709,10 +3712,12 @@ class UnichartNotebook:
             
         return filtered_cols
 
-    def summary(self, cols=None):
+    def summary(self, cols=None, print_table=False):
         """
-        Print a formatted statistical summary table.
+        Build a statistical summary DataFrame. Optionally print a formatted table.
         """
+        headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
+
         if cols is None:
             y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y] if self.last_y else []
             x_part = [self.last_x] if self.last_x else []
@@ -3721,71 +3726,78 @@ class UnichartNotebook:
             target_cols = cols if isinstance(cols, list) else [cols]
 
         if not target_cols:
-            print("No columns specified and no previous plot variables defined.")
-            return
+            if print_table:
+                print("No columns specified and no previous plot variables defined.")
+            return pd.DataFrame(columns=headers)
 
         active_ds = self.selected()
         if not active_ds:
-            print("No datasets selected. Cannot generate summary.")
-            return
+            if print_table:
+                print("No datasets selected. Cannot generate summary.")
+            return pd.DataFrame(columns=headers)
 
-        rows = []
+        records = []
         for ds in active_ds:
-            if ds.query:
-                q_str = str(ds.query)
-                query_disp = (q_str[:27] + '...') if len(q_str) > 30 else q_str
-            else:
-                query_disp = "-"
+            query_disp = str(ds.query) if ds.query else "-"
 
             for col in target_cols:
                 if col in ds.df.columns:
                     data = ds.df[col].dropna()
-                    
+
                     if data.empty:
-                        rows.append([
-                            f"Set {ds.index}", str(ds.title)[:20], query_disp, 
-                            str(col)[:15], "0", "-", "-", "-", "-"
-                        ])
+                        records.append({
+                            "Set": ds.index, "Title": ds.title, "Query": query_disp,
+                            "Variable": col, "Count": 0,
+                            "Min": np.nan, "Mean": np.nan, "Max": np.nan, "Std": np.nan,
+                        })
                     elif pd.api.types.is_numeric_dtype(data):
-                        count = len(data)
-                        vmin = data.min()
-                        vmean = data.mean()
-                        vmax = data.max()
-                        vstd = data.std()
-                        
-                        rows.append([
-                            f"Set {ds.index}",
-                            str(ds.title)[:20],
-                            query_disp,
-                            str(col)[:15],
-                            f"{count}",
-                            f"{vmin:.4g}",
-                            f"{vmean:.4g}",
-                            f"{vmax:.4g}",
-                            f"{vstd:.4g}" if pd.notna(vstd) else "-"
-                        ])
+                        records.append({
+                            "Set": ds.index, "Title": ds.title, "Query": query_disp,
+                            "Variable": col, "Count": len(data),
+                            "Min": data.min(), "Mean": data.mean(),
+                            "Max": data.max(), "Std": data.std(),
+                        })
                     else:
-                        rows.append([
-                            f"Set {ds.index}", str(ds.title)[:20], query_disp, 
-                            str(col)[:15], f"{len(data)}", "Non-numeric", "-", "-", "-"
-                        ])
+                        records.append({
+                            "Set": ds.index, "Title": ds.title, "Query": query_disp,
+                            "Variable": col, "Count": len(data),
+                            "Min": np.nan, "Mean": np.nan, "Max": np.nan, "Std": np.nan,
+                        })
 
-        if not rows:
-            print(f"None of the selected datasets contain the specified columns: {target_cols}")
-            return
+        df = pd.DataFrame(records, columns=headers)
 
-        headers = ["Set", "Title", "Query", "Variable", "Count", "Min", "Mean", "Max", "Std"]
-        
-        col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + rows))]
+        if print_table:
+            if df.empty:
+                print(f"None of the selected datasets contain the specified columns: {target_cols}")
+                return df
 
-        header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
-        sep = "-" * sum(col_widths)
+            display_rows = []
+            for _, r in df.iterrows():
+                q = r["Query"]
+                q_disp = (q[:27] + '...') if isinstance(q, str) and len(q) > 30 else q
+                display_rows.append([
+                    f"Set {r['Set']}",
+                    str(r['Title'])[:20],
+                    q_disp,
+                    str(r['Variable'])[:15],
+                    f"{int(r['Count'])}",
+                    f"{r['Min']:.4g}" if pd.notna(r['Min']) else "-",
+                    f"{r['Mean']:.4g}" if pd.notna(r['Mean']) else "-",
+                    f"{r['Max']:.4g}" if pd.notna(r['Max']) else "-",
+                    f"{r['Std']:.4g}" if pd.notna(r['Std']) else "-",
+                ])
 
-        print(f"\nStatistical Summary for: {', '.join(target_cols)}")
-        print(header_str)
-        print(sep)
-        for row in rows:
-            print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
+            col_widths = [max(len(str(item)) for item in col) + 2 for col in zip(*([headers] + display_rows))]
+            header_str = "".join(str(h).ljust(w) for h, w in zip(headers, col_widths))
+            sep = "-" * sum(col_widths)
+
+            print(f"\nStatistical Summary for: {', '.join(target_cols)}")
+            print(header_str)
+            print(sep)
+            for row in display_rows:
+                print("".join(str(val).ljust(w) for val, w in zip(row, col_widths)))
+
+        return df
 
     def help(self):
         """
