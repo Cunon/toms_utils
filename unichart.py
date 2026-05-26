@@ -210,21 +210,56 @@ class _DatasetFrameView:
     def __getitem__(self, key):
         return self._slice()[key]
 
+    @staticmethod
+    def _is_object_like(value):
+        """True if value carries string/object (non-numeric) data."""
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return True
+        if isinstance(value, pd.Series):
+            return not pd.api.types.is_numeric_dtype(value)
+        if isinstance(value, np.ndarray):
+            return value.dtype == object or value.dtype.kind in ('U', 'S')
+        # scalar: numbers (incl. bool) are numeric-friendly, everything else isn't
+        return not isinstance(value, numbers.Number)
+
     def __setitem__(self, key, value):
         notebook = self._dataset._notebook
         cdf = notebook._combined_df
         mask = (cdf[_SET_ID_COL] == self._dataset._set_id)
-        if key not in cdf.columns:
-            cdf[key] = pd.NA
-        if hasattr(value, '__len__') and not isinstance(value, str):
-            n = int(mask.sum())
+        target_idx = cdf.index[mask]
+
+        # Normalize the value and validate length for array-likes.
+        if isinstance(value, pd.Series):
+            # Align by label; labels absent from this set are dropped,
+            # missing target labels become NaN.
+            assign_val = value.reindex(target_idx)
+        elif hasattr(value, '__len__') and not isinstance(value, str):
+            n = len(target_idx)
             if len(value) != n:
                 raise ValueError(
                     f"Length mismatch assigning '{key}' to set "
                     f"{self._dataset.index}: {len(value)} values for {n} rows.")
-            cdf.loc[mask, key] = list(value)
+            assign_val = np.asarray(value)
         else:
-            cdf.loc[mask, key] = value
+            assign_val = value
+
+        # Choose/repair the column dtype. A masked .loc assignment cannot
+        # upcast in place on modern pandas, so a string into a float64 column
+        # raises. Create new columns — and widen existing numeric ones — to
+        # object when the incoming value is non-numeric.
+        incoming_object = self._is_object_like(assign_val)
+        if key not in cdf.columns:
+            cdf[key] = pd.Series(
+                None if incoming_object else np.nan,
+                index=cdf.index,
+                dtype=object if incoming_object else float,
+            )
+        elif incoming_object and cdf[key].dtype != object:
+            cdf[key] = cdf[key].astype(object)
+
+        cdf.loc[mask, key] = assign_val
         notebook._reapply_all_queries()
 
     @property
@@ -309,6 +344,19 @@ class Dataset:
         rows = cdf.loc[cdf[_SET_ID_COL] == self._set_id]
         return rows.drop(columns=_SET_ID_COL, errors='ignore')
 
+    def __getitem__(self, key):
+        """Read a column (or columns) for this set, e.g. ``ds['FN']``."""
+        return self.df[key]
+
+    def __setitem__(self, key, value):
+        """Write a column back into the combined frame for this set.
+
+        This is the supported way to add or modify columns, e.g.
+        ``ds['NEW'] = ds['A'] * 2``. Writing through ``ds.df[...]`` does NOT
+        persist, because ``df`` returns a fresh slice (a copy) each call.
+        """
+        self._df_full[key] = value
+
     @property
     def order(self):
         return self._order
@@ -322,6 +370,11 @@ class Dataset:
 
     @property
     def df(self):
+        """Read-only view of this set's rows (query mask applied).
+
+        Returns a fresh copy each call, so assigning to it does NOT persist:
+        use ``ds['col'] = ...`` (or ``nb.set_column``) to write back.
+        """
         cdf = self._notebook._combined_df
         set_mask = (cdf[_SET_ID_COL] == self._set_id)
         if self._query_mask is not None:
@@ -333,8 +386,9 @@ class Dataset:
 
     @df.setter
     def df(self, value):
+        # _replace_set_rows reapplies every set's query mask (the global index
+        # is rebuilt on replacement, which would otherwise stale other masks).
         self._notebook._replace_set_rows(self._set_id, value)
-        self._apply_query()
 
     @property
     def _df_full(self):
@@ -343,7 +397,6 @@ class Dataset:
     @_df_full.setter
     def _df_full(self, value):
         self._notebook._replace_set_rows(self._set_id, value)
-        self._apply_query()
 
     @property
     def query(self):
@@ -1180,13 +1233,15 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
     fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=subplot_titles or y_list)
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Boxplot Comparison: {x}", figsize,
-        boxmode=boxmode, showlegend=True
+        boxmode=boxmode, showlegend=True,
+        margin=dict(t=120, r=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     ))
 
     for ds in list_of_datasets:
         if not ds.select: continue
         df = ds.df
-        
+
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
             if yi not in df.columns: continue
@@ -1226,7 +1281,9 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     color_cycle = px.colors.qualitative.Plotly
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Box Comparison", figsize,
-        boxmode=boxmode
+        boxmode=boxmode, showlegend=True,
+        margin=dict(t=120, r=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     ))
 
     for idx_ds, ds in enumerate(active_ds):
@@ -1751,7 +1808,8 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
         darkmode, suptitle or "Variables by Dataset", figsize,
         boxmode=boxmode,
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
-        margin=dict(r=50 + (extras_count * 80))
+        margin=dict(t=120, r=50 + (extras_count * 80)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     ))
 
     return _show_or_return(fig, return_axes)
@@ -2043,6 +2101,9 @@ class UnichartNotebook:
             self._combined_df = tagged.reset_index(drop=True)
         else:
             self._combined_df = pd.concat([kept, tagged], ignore_index=True, sort=False)
+        # ignore_index rebuilds every row label, which staled all query masks
+        # (they are keyed to the global index). Recompute them all.
+        self._reapply_all_queries()
 
     def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
         """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one."""
@@ -2656,8 +2717,14 @@ class UnichartNotebook:
     # Analysis
     # ------------------------------------------------------------------
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
+              carry_base=None, carry_study=None, keep_values=False,
+              carry_prefix=("BASE_", "STUDY_"),
               suffixes=("_BASE", ""), direction='nearest', tolerance=None):
         """Compute delta (absolute and %) between each study dataset and the base, and load the results.
+
+        In addition to the computed delta columns, you can pull through the raw
+        aligned values and any extra context columns from the base and/or study
+        datasets into the new delta dataset.
 
         Parameters
         ----------
@@ -2669,12 +2736,43 @@ class UnichartNotebook:
             Column to align on (nearest-match merge). Defaults to last_x.
         delta_parms : str | list | None
             Columns to compute deltas for. Defaults to last_y.
+        carry_base : str | list | None
+            Extra column(s) from the BASE dataset to carry into the result.
+            Carried in NaN-safe alignment with each base row, prefixed with
+            carry_prefix[0] (default 'BASE_') so provenance is explicit and
+            there is never a collision with delta/value columns.
+        carry_study : str | list | None
+            Extra column(s) from the STUDY dataset to carry into the result.
+            Aligned to the matched study row and prefixed with carry_prefix[1]
+            (default 'STUDY_').
+        keep_values : bool
+            If True, also include the raw aligned values for every delta_parm,
+            named '<parm>_BASE' and '<parm>_STUDY', alongside the DL_/DLPCT_ columns.
+        carry_prefix : tuple[str, str]
+            (base_prefix, study_prefix) applied to carry_base / carry_study
+            column names. Defaults to ('BASE_', 'STUDY_'). Set either to '' to
+            keep the original name (only safe when there is no name overlap).
         suffixes : tuple[str, str]
-            Suffixes applied to base and study columns during the merge. Must differ.
+            Suffixes applied to base and study columns during the internal merge.
+            Must differ. The base suffix also names the raw base value columns
+            when keep_values is used.
         direction : 'nearest' | 'forward' | 'backward'
             Passed to merge_asof — controls which study row is matched to each base row.
         tolerance : numeric | None
             Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
+
+        Examples
+        --------
+        # Deltas plus the raw values they were computed from:
+        nb.delta(0, 'all', keep_values=True)
+
+        # Carry flight-condition context from the base for plotting/hover:
+        nb.delta(0, [1, 2], delta_parms=['EGT', 'N1'],
+                 carry_base=['ALT', 'MACH'])
+
+        # Carry a study-side identifier through as well:
+        nb.delta(0, 1, delta_parms='FUEL_FLOW',
+                 carry_base=['ALT'], carry_study=['CONFIG'], keep_values=True)
         """
         # Resolve align_on from last plot state
         if align_on is None:
@@ -2694,6 +2792,15 @@ class UnichartNotebook:
         delta_parms = [p for p in delta_parms if p is not None]
         if not delta_parms:
             raise ValueError("delta_parms is required when no prior plot exists.")
+
+        # Normalize carry specs
+        def _as_list(v):
+            if v is None:
+                return []
+            return list(v) if isinstance(v, (list, tuple, set)) else [v]
+        carry_base = _as_list(carry_base)
+        carry_study = _as_list(carry_study)
+        cb_prefix, cs_prefix = carry_prefix
 
         lsuffix, rsuffix = suffixes
         if lsuffix == rsuffix:
@@ -2728,10 +2835,37 @@ class UnichartNotebook:
                 print(f"Warning: skipping '{study_ds.title}' — no valid delta columns found.")
                 continue
 
-            df_base = (base_ds.df[[align_on] + valid_parms]
+            # Resolve carry columns against each side (exclude align_on; it's always kept)
+            base_carry = [c for c in carry_base if c != align_on and c in base_ds.df.columns]
+            base_missing = [c for c in carry_base if c != align_on and c not in base_ds.df.columns]
+            if base_missing:
+                print(f"Warning: carry_base column(s) not in base '{base_ds.title}': {base_missing}")
+
+            study_carry = [c for c in carry_study if c != align_on and c in study_ds.df.columns]
+            study_missing = [c for c in carry_study if c != align_on and c not in study_ds.df.columns]
+            if study_missing:
+                print(f"Warning: carry_study column(s) not in study '{study_ds.title}': {study_missing}")
+
+            # Build per-side frames. Select plain columns first (deduped), then add
+            # prefixed copies of carry columns so the merge never suffixes them and
+            # there is no collision even when a carried column is also a delta parm.
+            base_need = list(dict.fromkeys([align_on] + valid_parms + base_carry))
+            df_base = (base_ds.df[base_need]
                        .sort_values(align_on).reset_index(drop=True))
-            df_study = (study_ds.df[[align_on] + valid_parms]
+            for c in base_carry:
+                df_base[cb_prefix + c] = df_base[c]
+            df_base = df_base.drop(
+                columns=[c for c in base_carry if c not in valid_parms],
+                errors='ignore')
+
+            study_need = list(dict.fromkeys([align_on] + valid_parms + study_carry))
+            df_study = (study_ds.df[study_need]
                         .sort_values(align_on).reset_index(drop=True))
+            for c in study_carry:
+                df_study[cs_prefix + c] = df_study[c]
+            df_study = df_study.drop(
+                columns=[c for c in study_carry if c not in valid_parms],
+                errors='ignore')
 
             merge_kwargs = dict(on=align_on, suffixes=suffixes, direction=direction)
             if tolerance is not None:
@@ -2739,15 +2873,24 @@ class UnichartNotebook:
 
             merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
 
+            # Assemble result: align_on, then per-parm (raw values + deltas), then carried cols.
             result = merged[[align_on]].copy()
             for parm in valid_parms:
                 b_col = f"{parm}{lsuffix}"
                 s_col = f"{parm}{rsuffix}"
+                if keep_values:
+                    result[f"{parm}_BASE"] = merged[b_col]
+                    result[f"{parm}_STUDY"] = merged[s_col]
                 result[f"DL_{parm}"] = merged[s_col] - merged[b_col]
                 result[f"DLPCT_{parm}"] = np.where(
                     merged[b_col] == 0, np.nan,
-                    100 * (result[f"DL_{parm}"] / merged[b_col])
+                    100 * ((merged[s_col] - merged[b_col]) / merged[b_col])
                 )
+
+            for c in base_carry:
+                result[cb_prefix + c] = merged[cb_prefix + c]
+            for c in study_carry:
+                result[cs_prefix + c] = merged[cs_prefix + c]
 
             nan_frac = result[f"DL_{valid_parms[0]}"].isna().mean()
             if nan_frac > 0.5:
@@ -2761,7 +2904,7 @@ class UnichartNotebook:
             created.append(ds)
 
         return created
-
+    
     def combine_sets(self, uset_slice, title=None, ignore_index=True):
         """Concatenate multiple datasets row-wise into a new dataset.
 
@@ -3080,9 +3223,15 @@ class UnichartNotebook:
                 if yi in self.axis_limits:
                     fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
+        if fig is not None:
+            fig.update_layout(
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="left", x=0),
+                margin=dict(r=80),
+            )
         fig = self._apply_fonts(fig)
         if fig and suppress_legends:
-            fig.update_traces(visible='legendonly') 
+            fig.update_traces(visible='legendonly')
         self.last_fig = fig
         return fig
 
@@ -3273,6 +3422,11 @@ class UnichartNotebook:
             )
             if fig:
                 fig = self._apply_decorations(fig, [], y_list, 'global', 1)
+                fig.update_layout(
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="left", x=0),
+                    margin=dict(r=80),
+                )
                 fig = self._apply_fonts(fig)
                 if suppress_legends:
                     fig.update_traces(visible='legendonly')
@@ -3326,6 +3480,11 @@ class UnichartNotebook:
                 _nc = max(1, _nc)
                 fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
                                               [(x, yi) for yi in y_list])
+            fig.update_layout(
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="left", x=0),
+                margin=dict(r=80),
+            )
             fig = self._apply_fonts(fig)
             if suppress_legends:
                 fig.update_traces(visible='legendonly')
