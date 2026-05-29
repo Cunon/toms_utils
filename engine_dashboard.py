@@ -46,7 +46,7 @@ from __future__ import annotations
 from pathlib import Path
 import os, sys
 
-github_path = Path(r"/home/tje/Documents/GitHub")
+github_path = Path(r"/home/tom/Documents/GitHub")
 
 if os.path.exists(github_path):
     sys.path.append(str(github_path))
@@ -56,7 +56,7 @@ from typing import Mapping, Optional, Sequence, Tuple, Union
 import pandas as pd
 from dash import Dash, Input, Output, dcc, html
 
-from toms_utils.plot_engine_stations import (
+from Engine_Dashboard.plot_engine_stations import (
     Coord,
     ImageLike,
     overlay_values_on_image,
@@ -282,6 +282,14 @@ def _panel(title: str, body) -> html.Div:
 
 
 def _figure_panel(fig, graph_id: str = "main-figure") -> html.Div:
+    # The figure is built at a fixed design width/height. Left as-is it would
+    # overflow (and get clipped) on viewports narrower than that width. Capture
+    # its native aspect ratio, then let it autosize: a wrapper reserves space at
+    # that ratio and Plotly's "responsive" config scales the plot to fill it, so
+    # the line charts are never cut off and proportions are preserved.
+    design_w = fig.layout.width or 1280
+    design_h = fig.layout.height or 720
+    fig.update_layout(autosize=True, width=None, height=None)
     return html.Div(
         style={
             "backgroundColor": THEME["panel"],
@@ -290,15 +298,28 @@ def _figure_panel(fig, graph_id: str = "main-figure") -> html.Div:
             "padding": "12px",
         },
         children=[
-            dcc.Graph(
-                id=graph_id,
-                figure=fig,
-                config={
-                    "displayModeBar": True,
-                    "displaylogo": False,
-                    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+            html.Div(
+                style={
+                    "width": "100%",
+                    "aspectRatio": f"{design_w} / {design_h}",
                 },
-                style={"backgroundColor": "transparent"},
+                children=[
+                    dcc.Graph(
+                        id=graph_id,
+                        figure=fig,
+                        config={
+                            "displayModeBar": True,
+                            "displaylogo": False,
+                            "responsive": True,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                        },
+                        style={
+                            "width": "100%",
+                            "height": "100%",
+                            "backgroundColor": "transparent",
+                        },
+                    )
+                ],
             )
         ],
     )
