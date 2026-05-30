@@ -14,6 +14,7 @@ import inspect
 from scipy.interpolate import griddata
 import functools
 import gc
+from pathlib import Path
 
 # -----------------------------------------------------------------------------
 # Constants & Mappers (Translation Layer)
@@ -2105,8 +2106,21 @@ class UnichartNotebook:
         # (they are keyed to the global index). Recompute them all.
         self._reapply_all_queries()
 
-    def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False):
-        """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one."""
+    def load_df(self, df, title=None, set_name_column=None, set_idx_column=None, load_cols_as_vars=False, combined=False):
+        """Split a DataFrame into one Dataset per unique set_idx_column value, or load it as one.
+
+        ``df`` may be a single DataFrame or a list of DataFrames. For a list, ``combined=True``
+        concatenates them into one set, while ``combined=False`` loads each DataFrame separately.
+        """
+        if isinstance(df, (list, tuple)):
+            if combined:
+                df = pd.concat(df, ignore_index=True)
+            else:
+                for single_df in df:
+                    self.load_df(single_df, title=title, set_name_column=set_name_column,
+                                 set_idx_column=set_idx_column, load_cols_as_vars=load_cols_as_vars)
+                return
+
         df = df.copy()
 
         if not title:
@@ -2150,6 +2164,72 @@ class UnichartNotebook:
                     exec(f"{column} = '{column}'", globals())
                 except Exception as e:
                     print(f"Could not create variable for column '{column}': {e}")
+
+    _FILE_READERS = {
+        ".csv": lambda path, kw: pd.read_csv(path, **kw),
+        ".tsv": lambda path, kw: pd.read_csv(path, sep="\t", **kw),
+        ".txt": lambda path, kw: pd.read_csv(path, sep="\t", **kw),
+        ".xlsx": lambda path, kw: pd.read_excel(path, **kw),
+        ".xls": lambda path, kw: pd.read_excel(path, **kw),
+        ".json": lambda path, kw: pd.read_json(path, **kw),
+        ".parquet": lambda path, kw: pd.read_parquet(path, **kw),
+    }
+
+    def load(self, source, title=None, set_name_column=None, set_idx_column=None,
+             load_cols_as_vars=False, combined=False, read_kwargs=None):
+        """Load datasets from DataFrames, filepaths, dicts, or numpy arrays.
+
+        ``source`` may be a single item or a list of items; each is coerced to a DataFrame
+        and loaded via load_df. Supported files: .csv, .tsv, .txt, .xlsx, .xls, .json, .parquet
+        (``read_kwargs`` is passed through to the pandas reader). For a list, ``combined=True``
+        merges everything into one set while ``combined=False`` loads each separately. A file's
+        title defaults to its filename when no title or SETNUMBER/INDEX split column is present.
+        """
+        sources = list(source) if isinstance(source, (list, tuple)) else [source]
+        coerced = [self._coerce_to_df(s, read_kwargs) for s in sources]
+
+        def resolve_title(frame, default_title):
+            if title is not None or set_idx_column is not None:
+                return title
+            if "SETNUMBER" in frame.columns or "INDEX" in frame.columns:
+                return None
+            return default_title
+
+        if combined:
+            frame = pd.concat([df for df, _ in coerced], ignore_index=True)
+            default_title = next((dt for _, dt in coerced if dt), None)
+            self.load_df(frame, title=resolve_title(frame, default_title),
+                         set_name_column=set_name_column, set_idx_column=set_idx_column,
+                         load_cols_as_vars=load_cols_as_vars)
+            return
+
+        for frame, default_title in coerced:
+            self.load_df(frame, title=resolve_title(frame, default_title),
+                         set_name_column=set_name_column, set_idx_column=set_idx_column,
+                         load_cols_as_vars=load_cols_as_vars)
+
+    def _coerce_to_df(self, source, read_kwargs=None):
+        """Coerce a single source into a (DataFrame, default_title) pair. default_title is the
+        filename stem for file inputs, otherwise None."""
+        if isinstance(source, pd.DataFrame):
+            return source.copy(), None
+        if isinstance(source, (str, Path)):
+            path = Path(source)
+            if not path.is_file():
+                raise FileNotFoundError(f"No such file: {path}")
+            reader = self._FILE_READERS.get(path.suffix.lower())
+            if reader is None:
+                raise ValueError(
+                    f"Unsupported file type '{path.suffix}' for {path}; "
+                    f"supported: {', '.join(self._FILE_READERS)}")
+            return reader(path, read_kwargs or {}), path.stem
+        if isinstance(source, dict):
+            return pd.DataFrame(source), None
+        if isinstance(source, np.ndarray):
+            return pd.DataFrame(source), None
+        raise TypeError(
+            f"load() cannot handle source of type {type(source).__name__}; "
+            f"pass a DataFrame, filepath, dict, or numpy array.")
 
     def load_clipboard(self, **kwargs):
         """Quickly load data from system clipboard."""
