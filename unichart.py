@@ -2792,19 +2792,33 @@ class UnichartNotebook:
             
         mode = "Dark" if self.darkmode else "Light"
         print(f"Plot theme set to: {mode} Mode")
-
+    
     # ------------------------------------------------------------------
     # Analysis
     # ------------------------------------------------------------------
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
-              carry_base=None, carry_study=None, keep_values=False,
-              carry_prefix=("BASE_", "STUDY_"),
-              suffixes=("_BASE", ""), direction='nearest', tolerance=None):
-        """Compute delta (absolute and %) between each study dataset and the base, and load the results.
+              passed_parms=None, keep_parms=None,
+              direction='nearest', tolerance=None):
+        """Compute deltas (absolute and %) between each study dataset and the base.
 
-        In addition to the computed delta columns, you can pull through the raw
-        aligned values and any extra context columns from the base and/or study
-        datasets into the new delta dataset.
+        The resulting delta dataset is anchored on the BASE dataset's rows: every
+        column of the base set is carried through under its original name. On top
+        of that, for each delta parameter ``P`` the result gains:
+
+            DL_<P>      study value minus base value
+            DLPCT_<P>   100 * (study - base) / base   (NaN where base == 0)
+
+        Study-side values are surfaced only under a standardized ``<name>_STUDY``
+        name, via two complementary controls — nothing from the study set is
+        added under any other name:
+
+            keep_parms    keep the raw study value of selected *delta* parameters
+                          (a subset of delta_parms, or True / 'all' for all of them)
+            passed_parms  pass through arbitrary *extra* study columns for context
+
+        Because base columns keep their original names while study columns get the
+        ``_STUDY`` suffix, a delta parm ``P`` appears as ``P`` (base) and, when kept,
+        ``P_STUDY`` (study), so the asymmetry makes the provenance obvious at a glance.
 
         Parameters
         ----------
@@ -2816,43 +2830,38 @@ class UnichartNotebook:
             Column to align on (nearest-match merge). Defaults to last_x.
         delta_parms : str | list | None
             Columns to compute deltas for. Defaults to last_y.
-        carry_base : str | list | None
-            Extra column(s) from the BASE dataset to carry into the result.
-            Carried in NaN-safe alignment with each base row, prefixed with
-            carry_prefix[0] (default 'BASE_') so provenance is explicit and
-            there is never a collision with delta/value columns.
-        carry_study : str | list | None
-            Extra column(s) from the STUDY dataset to carry into the result.
-            Aligned to the matched study row and prefixed with carry_prefix[1]
-            (default 'STUDY_').
-        keep_values : bool
-            If True, also include the raw aligned values for every delta_parm,
-            named '<parm>_BASE' and '<parm>_STUDY', alongside the DL_/DLPCT_ columns.
-        carry_prefix : tuple[str, str]
-            (base_prefix, study_prefix) applied to carry_base / carry_study
-            column names. Defaults to ('BASE_', 'STUDY_'). Set either to '' to
-            keep the original name (only safe when there is no name overlap).
-        suffixes : tuple[str, str]
-            Suffixes applied to base and study columns during the internal merge.
-            Must differ. The base suffix also names the raw base value columns
-            when keep_values is used.
+        passed_parms : str | list | None
+            Extra STUDY column(s) to carry into the result as ``<name>_STUDY``.
+            Intended for context columns that are not themselves being deltaed.
+        keep_parms : str | list | bool | None
+            Which delta parameters' raw STUDY values to keep, as ``<name>_STUDY``.
+            Pass a subset of delta_parms, or True / 'all' to keep every one.
+            None / False keeps no study values (only the deltas and base columns).
         direction : 'nearest' | 'forward' | 'backward'
-            Passed to merge_asof — controls which study row is matched to each base row.
+            Passed to merge_asof — controls which study row matches each base row.
         tolerance : numeric | None
             Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
 
+        Notes
+        -----
+        Provenance is recorded on the created dataset as
+        ``ds.delta_sets = {'base': base_index, 'study': study_index}``.
+
+        A delta parameter that is non-numeric on either side (strings,
+        categoricals, datetimes, object dtype, etc.) cannot be subtracted, so no
+        ``DL_``/``DLPCT_`` columns are produced for it. Instead it is carried
+        through as a base/study side-by-side pair (``<name>`` and
+        ``<name>_STUDY``) and a warning is emitted, so a mistyped or categorical
+        column never crashes the call.
+
         Examples
         --------
-        # Deltas plus the raw values they were computed from:
-        nb.delta(0, 'all', keep_values=True)
+        # Deltas plus the raw study values they were computed from:
+        nb.delta(0, 'all', keep_parms='all')
 
-        # Carry flight-condition context from the base for plotting/hover:
+        # Delta only EGT and N1, keep the study EGT value, carry a study config label:
         nb.delta(0, [1, 2], delta_parms=['EGT', 'N1'],
-                 carry_base=['ALT', 'MACH'])
-
-        # Carry a study-side identifier through as well:
-        nb.delta(0, 1, delta_parms='FUEL_FLOW',
-                 carry_base=['ALT'], carry_study=['CONFIG'], keep_values=True)
+                 keep_parms='EGT', passed_parms='CONFIG')
         """
         # Resolve align_on from last plot state
         if align_on is None:
@@ -2873,24 +2882,38 @@ class UnichartNotebook:
         if not delta_parms:
             raise ValueError("delta_parms is required when no prior plot exists.")
 
-        # Normalize carry specs
+        # align_on is the merge key, not a delta target. If it slipped into
+        # delta_parms (e.g. a SETNUMBER/INDEX column that is also last_x, or an
+        # explicit list that includes the align column), drop it — the study side
+        # keeps the key un-renamed, so a '<align_on>_STUDY' column never exists and
+        # deltaing the key against itself is meaningless.
+        if align_on in delta_parms:
+            print(f"Note: '{align_on}' is the alignment key, not a delta parameter — "
+                  f"ignoring it in delta_parms.")
+            delta_parms = [p for p in delta_parms if p != align_on]
+            if not delta_parms:
+                raise ValueError(
+                    "delta_parms contained only the alignment column; nothing to delta.")
+
+        # Normalize study-side passthrough specs
         def _as_list(v):
             if v is None:
                 return []
             return list(v) if isinstance(v, (list, tuple, set)) else [v]
-        carry_base = _as_list(carry_base)
-        carry_study = _as_list(carry_study)
-        cb_prefix, cs_prefix = carry_prefix
+        passed_parms = _as_list(passed_parms)
 
-        lsuffix, rsuffix = suffixes
-        if lsuffix == rsuffix:
-            raise ValueError(f"suffixes must be different; both are '{lsuffix}'.")
+        # keep_parms: True/'all' -> every delta parm; None/False -> none; else a subset.
+        if keep_parms is True or (isinstance(keep_parms, str) and keep_parms.lower() == 'all'):
+            keep_parms = list(delta_parms)
+        elif keep_parms is None or keep_parms is False:
+            keep_parms = []
+        else:
+            keep_parms = _as_list(keep_parms)
 
         if not (0 <= base_idx < len(self.sets)):
             raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.sets)} datasets).")
 
         base_ds = self.sets[base_idx]
-
         if align_on not in base_ds.df.columns:
             raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
 
@@ -2907,7 +2930,8 @@ class UnichartNotebook:
                 print(f"Warning: skipping '{study_ds.title}' — align_on column '{align_on}' not found.")
                 continue
 
-            valid_parms = [p for p in delta_parms if p in base_ds.df.columns and p in study_ds.df.columns]
+            valid_parms = [p for p in delta_parms
+                           if p in base_ds.df.columns and p in study_ds.df.columns]
             skipped = sorted(set(delta_parms) - set(valid_parms))
             if skipped:
                 print(f"Warning: skipping columns not present in both datasets: {skipped}")
@@ -2915,76 +2939,121 @@ class UnichartNotebook:
                 print(f"Warning: skipping '{study_ds.title}' — no valid delta columns found.")
                 continue
 
-            # Resolve carry columns against each side (exclude align_on; it's always kept)
-            base_carry = [c for c in carry_base if c != align_on and c in base_ds.df.columns]
-            base_missing = [c for c in carry_base if c != align_on and c not in base_ds.df.columns]
-            if base_missing:
-                print(f"Warning: carry_base column(s) not in base '{base_ds.title}': {base_missing}")
+            # Resolve study-side keep (a subset of delta parms) and passthrough columns.
+            # align_on is always the merge key and is never duplicated as a *_STUDY col.
+            keep_valid = [p for p in keep_parms if p != align_on and p in valid_parms]
+            keep_dropped = [p for p in keep_parms if p != align_on and p not in valid_parms]
+            if keep_dropped:
+                print(f"Warning: keep_parms not among valid delta columns (ignored): "
+                      f"{sorted(set(keep_dropped))}")
 
-            study_carry = [c for c in carry_study if c != align_on and c in study_ds.df.columns]
-            study_missing = [c for c in carry_study if c != align_on and c not in study_ds.df.columns]
-            if study_missing:
-                print(f"Warning: carry_study column(s) not in study '{study_ds.title}': {study_missing}")
+            passed_valid = [c for c in passed_parms
+                            if c != align_on and c in study_ds.df.columns]
+            passed_missing = [c for c in passed_parms
+                              if c != align_on and c not in study_ds.df.columns]
+            if passed_missing:
+                print(f"Warning: passed_parms not in study '{study_ds.title}' (ignored): {passed_missing}")
 
-            # Build per-side frames. Select plain columns first (deduped), then add
-            # prefixed copies of carry columns so the merge never suffixes them and
-            # there is no collision even when a carried column is also a delta parm.
-            base_need = list(dict.fromkeys([align_on] + valid_parms + base_carry))
-            df_base = (base_ds.df[base_need]
-                       .sort_values(align_on).reset_index(drop=True))
-            for c in base_carry:
-                df_base[cb_prefix + c] = df_base[c]
-            df_base = df_base.drop(
-                columns=[c for c in base_carry if c not in valid_parms],
-                errors='ignore')
+            # --- Base side: every base column, anchored and sorted on align_on. ---
+            base_df = base_ds.df.loc[:, ~base_ds.df.columns.duplicated()]
+            df_base = base_df.sort_values(align_on).reset_index(drop=True)
 
-            study_need = list(dict.fromkeys([align_on] + valid_parms + study_carry))
-            df_study = (study_ds.df[study_need]
-                        .sort_values(align_on).reset_index(drop=True))
-            for c in study_carry:
-                df_study[cs_prefix + c] = df_study[c]
-            df_study = df_study.drop(
-                columns=[c for c in study_carry if c not in valid_parms],
-                errors='ignore')
+            # --- Study side: align_on + (delta parms ∪ passthroughs), renamed *_STUDY. ---
+            study_df = study_ds.df.loc[:, ~study_ds.df.columns.duplicated()]
+            study_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
+            df_study = study_df[study_need].sort_values(align_on).reset_index(drop=True)
+            df_study = df_study.rename(
+                columns={c: f"{c}_STUDY" for c in df_study.columns if c != align_on})
 
-            merge_kwargs = dict(on=align_on, suffixes=suffixes, direction=direction)
+            # Guard against a pathological base column already named like a *_STUDY col;
+            # study values win for that name so the merge stays clean.
+            overlap = (set(df_base.columns) & set(df_study.columns)) - {align_on}
+            if overlap:
+                print(f"Warning: base column(s) collide with study '*_STUDY' names and were "
+                      f"dropped in favor of study values: {sorted(overlap)}")
+                df_base = df_base.drop(columns=list(overlap))
+
+            merge_kwargs = dict(on=align_on, direction=direction)
             if tolerance is not None:
                 merge_kwargs['tolerance'] = tolerance
-
             merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
 
-            # Assemble result: align_on, then per-parm (raw values + deltas), then carried cols.
-            result = merged[[align_on]].copy()
+            # Only parms that are numeric on BOTH sides can be subtracted. Anything
+            # else (strings, categoricals, datetimes, object dtype) is carried
+            # through as a base/study side-by-side pair instead of crashing the
+            # subtraction. dtype is checked post-merge so unmatched rows (NaN) and
+            # any merge upcasting are reflected.
+            numeric_parms, nonnumeric_parms = [], []
             for parm in valid_parms:
-                b_col = f"{parm}{lsuffix}"
-                s_col = f"{parm}{rsuffix}"
-                if keep_values:
-                    result[f"{parm}_BASE"] = merged[b_col]
-                    result[f"{parm}_STUDY"] = merged[s_col]
-                result[f"DL_{parm}"] = merged[s_col] - merged[b_col]
-                result[f"DLPCT_{parm}"] = np.where(
+                b_num = pd.api.types.is_numeric_dtype(merged[parm])
+                s_num = pd.api.types.is_numeric_dtype(merged[f"{parm}_STUDY"])
+                (numeric_parms if (b_num and s_num) else nonnumeric_parms).append(parm)
+
+            if nonnumeric_parms:
+                print(f"Warning: '{study_ds.title}' — cannot compute a numeric delta for "
+                      f"non-numeric column(s) {nonnumeric_parms}; carrying base and study "
+                      f"values side-by-side (as '<name>' and '<name>_STUDY') instead.")
+
+            # Deltas (numeric parms only): base value keeps its original name,
+            # study value is *_STUDY.
+            for parm in numeric_parms:
+                b_col, s_col = parm, f"{parm}_STUDY"
+                merged[f"DL_{parm}"] = merged[s_col] - merged[b_col]
+                merged[f"DLPCT_{parm}"] = np.where(
                     merged[b_col] == 0, np.nan,
                     100 * ((merged[s_col] - merged[b_col]) / merged[b_col])
                 )
 
-            for c in base_carry:
-                result[cb_prefix + c] = merged[cb_prefix + c]
-            for c in study_carry:
-                result[cs_prefix + c] = merged[cs_prefix + c]
+            # Which study *_STUDY columns survive into the result: explicit keeps,
+            # every non-numeric parm (so a carried string is actually comparable),
+            # and the passthroughs.
+            study_keep_cols = ({f"{p}_STUDY" for p in keep_valid}
+                               | {f"{p}_STUDY" for p in nonnumeric_parms}
+                               | {f"{c}_STUDY" for c in passed_valid})
 
-            nan_frac = result[f"DL_{valid_parms[0]}"].isna().mean()
-            if nan_frac > 0.5:
-                print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
-                      f"(large alignment gaps; consider tolerance= or a different direction=).")
+            # Assemble result with a predictable, plot-friendly column order:
+            #   1. align_on
+            #   2. per-parm block:
+            #        numeric     -> <P>, <P>_STUDY (if kept), DL_<P>, DLPCT_<P>
+            #        non-numeric -> <P>, <P>_STUDY            (no delta)
+            #   3. remaining base context columns (full base set, original names)
+            #   4. study passthrough columns (<name>_STUDY)
+            result = merged[[align_on]].copy()
+            for parm in valid_parms:
+                result[parm] = merged[parm]                       # base value (original name)
+                s_col = f"{parm}_STUDY"
+                if parm in nonnumeric_parms:
+                    result[s_col] = merged[s_col]                 # study value, no delta
+                else:
+                    if s_col in study_keep_cols:
+                        result[s_col] = merged[s_col]             # study value (kept)
+                    result[f"DL_{parm}"] = merged[f"DL_{parm}"]
+                    result[f"DLPCT_{parm}"] = merged[f"DLPCT_{parm}"]
+
+            for c in df_base.columns:                             # remaining base context
+                if c not in result.columns:
+                    result[c] = merged[c]
+
+            for c in passed_valid:                                # study passthroughs
+                s_col = f"{c}_STUDY"
+                if s_col not in result.columns:
+                    result[s_col] = merged[s_col]
+
+            if numeric_parms:
+                nan_frac = result[f"DL_{numeric_parms[0]}"].isna().mean()
+                if nan_frac > 0.5:
+                    print(f"Warning: '{study_ds.title}' — {nan_frac:.0%} of delta rows are NaN "
+                          f"(large alignment gaps; consider tolerance= or a different direction=).")
 
             new_title = f"Delta {base_ds.index}-{study_ds.index}"
             ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
+            ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index}
             print(f"Loaded Set {ds.index}: {new_title}")
             created.append(ds)
 
         return created
-    
+        
     def combine_sets(self, uset_slice, title=None, ignore_index=True):
         """Concatenate multiple datasets row-wise into a new dataset.
 
