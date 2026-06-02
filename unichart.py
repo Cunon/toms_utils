@@ -2926,11 +2926,7 @@ class UnichartNotebook:
 
             keep_parms    keep the raw study value of selected *delta* parameters
                           (a subset of delta_parms, or True / 'all' for all of them)
-            passed_parms  pass through arbitrary *extra* study columns for context
-
-        Because base columns keep their original names while study columns get the
-        ``_STUDY`` suffix, a delta parm ``P`` appears as ``P`` (base) and, when kept,
-        ``P_STUDY`` (study), so the asymmetry makes the provenance obvious at a glance.
+            passed_parms  pass through additional study columns for context
 
         Parameters
         ----------
@@ -2953,27 +2949,6 @@ class UnichartNotebook:
             Passed to merge_asof — controls which study row matches each base row.
         tolerance : numeric | None
             Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
-
-        Notes
-        -----
-        Provenance is recorded on the created dataset as
-        ``ds.delta_sets = {'base': base_index, 'study': study_index}``.
-
-        A delta parameter that is non-numeric on either side (strings,
-        categoricals, datetimes, object dtype, etc.) cannot be subtracted, so no
-        ``DL_``/``DLPCT_`` columns are produced for it. Instead it is carried
-        through as a base/study side-by-side pair (``<name>`` and
-        ``<name>_STUDY``) and a warning is emitted, so a mistyped or categorical
-        column never crashes the call.
-
-        Examples
-        --------
-        # Deltas plus the raw study values they were computed from:
-        nb.delta(0, 'all', keep_parms='all')
-
-        # Delta only EGT and N1, keep the study EGT value, carry a study config label:
-        nb.delta(0, [1, 2], delta_parms=['EGT', 'N1'],
-                 keep_parms='EGT', passed_parms='CONFIG')
         """
         # Resolve align_on from last plot state
         if align_on is None:
