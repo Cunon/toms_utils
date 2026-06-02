@@ -182,6 +182,7 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'alpha':      var_fmt.get('alpha',      dataset.alpha),
         'edge_color': getattr(dataset, 'edge_color', 'black'),
         'edgewidth':  getattr(dataset, 'edgewidth', 1),
+        'fill':       getattr(dataset, 'fill', True),
     }
 
 # -----------------------------------------------------------------------------
@@ -321,6 +322,7 @@ class Dataset:
 
         self._marker = marker_map(index)
         self._edge_color = "black"
+        self._fill = True
         self._linestyle = None
         self.markersize = 10
         self.alpha = 1
@@ -452,6 +454,18 @@ class Dataset:
     def edge_color(self, value): self._edge_color = value
 
     @property
+    def fill(self): return self._fill
+
+    @fill.setter
+    def fill(self, value):
+        if str(value).lower() in ['true', '1', 't', 'on']:
+            self._fill = True
+        elif str(value).lower() in ['false', '0', 'f', 'off']:
+            self._fill = False
+        else:
+            raise ValueError(f"Invalid value for fill: {value}")
+
+    @property
     def plot_type(self): return self._plot_type
 
     @plot_type.setter
@@ -520,6 +534,7 @@ class Dataset:
             'color': self.color,
             'marker': self.marker,
             'edge_color': self.edge_color,
+            'fill': self.fill,
             'linestyle': self.linestyle,
             'markersize': self.markersize,
             'alpha': self.alpha,
@@ -843,9 +858,14 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                     marker_dict['color'] = hue_series.cat.codes
                     marker_dict['colorscale'] = fmt.get('hue_palette', 'Jet')
                     marker_dict['showscale'] = False
-            else:
+
+            if fmt.get('fill', True):
                 marker_dict['color'] = cur_color
-                line_dict['color'] = cur_color
+            else:
+                # No fill: hollow marker whose outline takes the set color.
+                marker_dict['color'] = 'rgba(0,0,0,0)'
+                marker_dict['line'] = dict(width=fmt.get('edgewidth', 1), color=cur_color)
+            line_dict['color'] = cur_color
 
             fig.add_trace(go.Scatter(
                 x=df[x_col], y=df[yi], mode=mode,
@@ -1929,6 +1949,18 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 
             y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
+            if fmt.get('fill', True):
+                marker_kw = dict(
+                    color=fmt['color'],
+                    line=dict(width=fmt['edgewidth'], color=fmt['edge_color']),
+                )
+            else:
+                # No fill: hollow marker whose outline takes the set color.
+                marker_kw = dict(
+                    color='rgba(0,0,0,0)',
+                    line=dict(width=fmt['edgewidth'], color=fmt['color']),
+                )
+
             fig.add_trace(go.Scatter(
                 x=df[x], y=df[yi],
                 mode=mode,
@@ -1939,9 +1971,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                 marker=dict(
                     size=fmt['markersize'],
                     symbol=get_plotly_marker(fmt['marker']),
-                    color=fmt['color'],
                     opacity=fmt['alpha'],
-                    line=dict(width=fmt['edgewidth'], color=fmt['edge_color']),
+                    **marker_kw,
                 ),
                 line=dict(
                     width=fmt['linewidth'],
@@ -2420,24 +2451,38 @@ class UnichartNotebook:
     def color(self, uset_slice, color_val):
         """
         Set the primary color for the specified dataset(s).
-        
+
         Args:
             uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            color_val (str): A standard color name ('red'), hex code ('#FF5733'), 
-                             or RGB/RGBA string ('rgb(255, 0, 0)').
+            color_val (str or int): A color spec, or an integer set index.
+                - str: a standard color name ('red'), hex code ('#FF5733'),
+                or RGB/RGBA string ('rgb(255, 0, 0)').
+                - int: resolves to the *default* palette color that set index
+                would have been assigned at load time, independent of any
+                recoloring that set has since received. E.g. color(5, 2)
+                gives set 5 the original color of set 2.
         """
+        if isinstance(color_val, int) and not isinstance(color_val, bool):
+            default_colors = px.colors.qualitative.Plotly
+            color_val = default_colors[color_val % len(default_colors)]
         for ds in self._get_uset_slice(uset_slice):
             ds.color = color_val
 
     def marker(self, uset_slice, marker_val):
         """
         Set the marker style for the specified dataset(s).
-        
+
         Args:
             uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            marker_val (str): Matplotlib-style marker ('o', 's', '^', 'D', '.') 
-                              or Plotly-style marker ('circle', 'square').
+            marker_val (str or int): A marker spec, or an integer set index.
+                - str: Matplotlib-style marker ('o', 's', '^', 'D', '.')
+                or Plotly-style marker ('circle', 'square').
+                - int: resolves to the *default* marker that set index would have
+                been assigned at load time, independent of any later restyling.
+                E.g. marker(5, 2) gives set 5 the original marker of set 2.
         """
+        if isinstance(marker_val, int) and not isinstance(marker_val, bool):
+            marker_val = marker_map(marker_val)
         for ds in self._get_uset_slice(uset_slice):
             ds.marker = marker_val
 
@@ -2466,6 +2511,29 @@ class UnichartNotebook:
         """
         for ds in self._get_uset_slice(uset_slice):
             ds.linewidth = width_val
+
+    def edgewidth(self, uset_slice, width_val):
+        """
+        Set the marker edge width (outline thickness) for the specified dataset(s).
+
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            width_val (int or float): The thickness of the marker edge. Must be >= 0.
+        """
+        for ds in self._get_uset_slice(uset_slice):
+            ds.edgewidth = width_val
+
+    def fill(self, uset_slice, fill_val):
+        """
+        Set the fill state (whether markers are solid or hollow) for the specified dataset(s).
+
+        Args:
+            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            fill_val (bool, int, or str): True/False (or 'on'/'off', '1'/'0', 't'/'f') 
+                                          to enable or disable marker fill.
+        """
+        for ds in self._get_uset_slice(uset_slice):
+            ds.fill = fill_val
 
     def hue(self, uset_slice, col_name):
         """
