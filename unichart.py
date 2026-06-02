@@ -564,7 +564,51 @@ class Dataset:
 # -----------------------------------------------------------------------------
 
 def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', bounds_error=False):
-    """1D interpolation on a sorted DataFrame column."""
+    """Interpolate values from a DataFrame column using 1-D interpolation.
+
+    This function sorts the DataFrame by the x column, constructs a 1-D
+    interpolator for the (x_col, y_col) pairs using scipy.interpolate.interp1d,
+    and evaluates the interpolator at the provided x_in points.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame containing the source data. Must contain columns named
+        x_col and y_col.
+    x_col : str
+        Name of the column to use as the independent variable (x-axis).
+    y_col : str
+        Name of the column to use as the dependent variable (y-axis).
+    x_in : array-like or scalar
+        Points at which to evaluate the interpolator. Can be a scalar,
+        list, or numpy array.
+    kind : str or int, optional
+        Specifies the kind of interpolation to use. Passed directly to
+        scipy.interpolate.interp1d (e.g. 'linear', 'nearest', 'zero',
+        'slinear', 'quadratic', 'cubic', or an integer for spline order).
+        Default is 'linear'.
+    fill_value : float or (float, float) or {'extrapolate'}, optional
+        Value to use for points outside the interpolation range. Matches
+        interp1d's fill_value behaviour. Default is 'extrapolate'.
+    bounds_error : bool, optional
+        If True, raise a ValueError when attempting to interpolate outside
+        the range of x values. If False, use fill_value. Default is False.
+
+    Returns
+    -------
+    numpy.ndarray or scalar
+        Interpolated y values corresponding to x_in. The type mirrors the
+        output of scipy.interpolate.interp1d evaluated at x_in (scalar or
+        array).
+
+    Notes
+    -----
+    - The DataFrame is sorted by x_col before building the interpolator to
+      ensure monotonic x values as expected by interp1d.
+    - For best results, ensure x_col contains unique values; duplicate x
+      values can lead to undefined behavior from interp1d.
+
+    """
     if x_col not in df.columns or y_col not in df.columns:
         raise ValueError(f"Columns '{x_col}' and '{y_col}' must be present in the DataFrame.")
 
@@ -3835,6 +3879,31 @@ class UnichartNotebook:
             self.last_fig = fig
 
         return fig
+
+    def table_read(self, uset_slice, x_col, y_col, x_in,
+                   kind=None, fill_value='extrapolate', bounds_error=False):
+        """Interpolate y values at ``x_in`` from the selected dataset(s).
+
+        Wraps the module-level :func:`table_read`, calling it once per dataset
+        in ``uset_slice`` against the dataset's (query-masked) ``df``.
+
+        The interpolation ``kind`` defaults to each dataset's ``reg_order``
+        (falling back to ``'linear'`` when that is unset/falsy), unless the
+        caller passes an explicit ``kind``. ``reg_order`` is passed through to
+        scipy unchanged, so regression-only specs that interp1d doesn't accept
+        (e.g. 'poly2', 'log', tuples) will raise — use an explicit ``kind`` for
+        those.
+
+        Returns a dict keyed by ``ds.index`` mapping to the interpolated values.
+        """
+        results = {}
+        for ds in self._get_uset_slice(uset_slice):
+            ds_kind = kind if kind is not None else (ds.reg_order or 'linear')
+            results[ds.index] = table_read(
+                ds.df, x_col, y_col, x_in,
+                kind=ds_kind, fill_value=fill_value, bounds_error=bounds_error,
+            )
+        return results
 
     # ------------------------------------------------------------------
     # The table Command
