@@ -3864,10 +3864,11 @@ class UnichartNotebook:
 
         The interpolation ``kind`` defaults to each dataset's ``reg_order``
         (falling back to ``'linear'`` when that is unset/falsy), unless the
-        caller passes an explicit ``kind``. ``reg_order`` is passed through to
-        scipy unchanged, so regression-only specs that interp1d doesn't accept
-        (e.g. 'poly2', 'log', tuples) will raise — use an explicit ``kind`` for
-        those.
+        caller passes an explicit ``kind``. Note this low-level wrapper passes
+        ``kind`` straight to scipy's ``interp1d``, so it only accepts interp1d
+        kinds — regression-only specs ('poly2', 'log', tuples) will raise here.
+        Use :meth:`table` (which routes through the regression machinery) to
+        read values that match a ``reg_order`` curve.
 
         Returns a dict keyed by ``ds.index`` mapping to the interpolated values.
         """
@@ -3883,7 +3884,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None):
+    def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None, output=None):
         """
         Display a Plotly Table of specific columns from selected datasets.
 
@@ -3893,12 +3894,29 @@ class UnichartNotebook:
         ``x_col`` (defaults to ``self.last_x``) to build the table from
         interpolated values instead of the raw rows. For each selected dataset
         the y column(s) — taken from ``cols`` (or ``self.last_y``) — are
-        evaluated at every value in ``x_in`` via :func:`table_read`, using the
-        same ``kind`` precedence as :meth:`table_read` (explicit ``kind`` >
-        dataset ``reg_order`` > ``'linear'``). An ``INTERPOLATED`` column marks
-        each row ``True`` when the x value is not already present in the set and
-        ``False`` when it is.
+        read off the fitted curve at every value in ``x_in``. The regression
+        spec is taken from ``kind`` if given, otherwise the dataset's
+        ``reg_order``; ``kind`` accepts the *same* specs as ``reg_order`` (e.g.
+        ``'poly2'``, ``'log'``, ``'exp'``, ``'power'``, ``'spline'``,
+        ``'lowess'``, ``'ma'``, or ``(kind, param)`` tuples), so the table
+        matches the plotted curve. When no spec is set, values are interpolated
+        piecewise-linearly through the raw points. Non-numeric y columns carry
+        the value from the row whose x is nearest each requested x. An
+        ``INTERPOLATED`` column marks each row ``True`` when the x value is not
+        already present in the set and ``False`` when it is.
+
+        Output mode
+        -----------
+        ``output`` controls what the method produces:
+
+        - ``None`` (default): render and display the styled HTML table.
+        - ``'df'``: return the assembled :class:`pandas.DataFrame` without
+          displaying anything.
+        - ``'md'``: return the table as a GitHub-flavored Markdown string.
         """
+        if output is not None and output not in ('df', 'md'):
+            print(f"Unknown output mode '{output}'. Use None, 'df', or 'md'.")
+            return
         combined_dfs = []
 
         if x_in is not None:
@@ -3929,12 +3947,30 @@ class UnichartNotebook:
                 if not valid_ycols:
                     continue
 
-                ds_kind = kind if kind is not None else (ds.reg_order or 'linear')
+                spec = kind if kind is not None else ds.reg_order
                 existing = df[xc].to_numpy(dtype=float)
 
                 subset = pd.DataFrame({xc: x_arr})
                 for yc in valid_ycols:
-                    subset[yc] = table_read(df, xc, yc, x_arr, kind=ds_kind)
+                    if pd.api.types.is_numeric_dtype(df[yc]):
+                        # Use the same regression model as the plot (any
+                        # reg_order kind), reading values off the fitted curve.
+                        # Fall back to piecewise-linear interpolation through the
+                        # raw points when no regression spec is set.
+                        rx, ry, _ = (_calculate_regression(df, xc, yc, spec)
+                                     if spec else (None, None, None))
+                        if rx is not None:
+                            subset[yc] = np.interp(x_arr, rx, ry)
+                        else:
+                            subset[yc] = table_read(df, xc, yc, x_arr, kind='linear')
+                    else:
+                        # Non-interpolatable (string/categorical) column: carry the
+                        # value from the row whose x is nearest to each requested x.
+                        order = np.argsort(existing)
+                        x_sorted = existing[order]
+                        y_sorted = df[yc].to_numpy()[order]
+                        nearest = np.abs(x_sorted[:, None] - x_arr[None, :]).argmin(axis=0)
+                        subset[yc] = y_sorted[nearest]
                 subset['INTERPOLATED'] = [
                     not np.any(np.isclose(existing, xv)) for xv in x_arr
                 ]
@@ -3976,6 +4012,17 @@ class UnichartNotebook:
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
         final_df = final_df.fillna('-')
+
+        if output == 'df':
+            return final_df
+
+        if output == 'md':
+            try:
+                return final_df.to_markdown(index=False)
+            except ImportError:
+                print("Markdown output requires the 'tabulate' package "
+                      "(pip install tabulate).")
+                return
 
         if self.darkmode:
             header_color = 'rgb(30, 30, 30)'

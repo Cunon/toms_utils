@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(python *)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(jupyter nbconvert *)",
+      "Bash(pip install *)"
     ]
   }
 }
