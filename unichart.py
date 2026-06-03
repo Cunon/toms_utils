@@ -3883,39 +3883,96 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None):
+    def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None):
         """
         Display a Plotly Table of specific columns from selected datasets.
+
+        Interpolation mode
+        ------------------
+        Pass ``x_in`` (a scalar or list-like of x values) together with an
+        ``x_col`` (defaults to ``self.last_x``) to build the table from
+        interpolated values instead of the raw rows. For each selected dataset
+        the y column(s) — taken from ``cols`` (or ``self.last_y``) — are
+        evaluated at every value in ``x_in`` via :func:`table_read`, using the
+        same ``kind`` precedence as :meth:`table_read` (explicit ``kind`` >
+        dataset ``reg_order`` > ``'linear'``). An ``INTERPOLATED`` column marks
+        each row ``True`` when the x value is not already present in the set and
+        ``False`` when it is.
         """
-        if cols is None:
-            if self.last_x is None or self.last_y is None:
-                print("No columns specified and no previous plot variables defined.")
-                return
-            
-            y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
-            target_cols = [self.last_x] + y_part
-        else:
-            target_cols = cols if isinstance(cols, list) else [cols]
-
         combined_dfs = []
-        
-        for ds in self.sets:
-            if not ds.select:
-                continue
-            
-            valid_cols = [c for c in target_cols if c in ds.df.columns]
-            
-            if not valid_cols:
-                continue
-                
-            subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
-            subset.insert(0, 'Dataset', ds.title)
-            subset.insert(0, 'Set', ds.index)
-            combined_dfs.append(subset)
 
-        if not combined_dfs:
-            print("No data found for the specified columns in selected datasets.")
-            return
+        if x_in is not None:
+            xc = x_col or self.last_x
+            if xc is None:
+                print("Interpolation mode requires an x column (pass x_col= or run a plot first).")
+                return
+
+            if cols is not None:
+                y_cols = cols if isinstance(cols, list) else [cols]
+            elif self.last_y is not None:
+                y_cols = self.last_y if isinstance(self.last_y, list) else [self.last_y]
+            else:
+                print("No y column(s) specified for interpolation.")
+                return
+            y_cols = [c for c in y_cols if c != xc]
+
+            x_arr = np.atleast_1d(x_in)
+
+            for ds in self.sets:
+                if not ds.select:
+                    continue
+
+                df = ds.df
+                if xc not in df.columns:
+                    continue
+                valid_ycols = [c for c in y_cols if c in df.columns]
+                if not valid_ycols:
+                    continue
+
+                ds_kind = kind if kind is not None else (ds.reg_order or 'linear')
+                existing = df[xc].to_numpy(dtype=float)
+
+                subset = pd.DataFrame({xc: x_arr})
+                for yc in valid_ycols:
+                    subset[yc] = table_read(df, xc, yc, x_arr, kind=ds_kind)
+                subset['INTERPOLATED'] = [
+                    not np.any(np.isclose(existing, xv)) for xv in x_arr
+                ]
+                subset.insert(0, 'Dataset', ds.title)
+                subset.insert(0, 'Set', ds.index)
+                combined_dfs.append(subset)
+
+            if not combined_dfs:
+                print("No data found for the specified columns in selected datasets.")
+                return
+        else:
+            if cols is None:
+                if self.last_x is None or self.last_y is None:
+                    print("No columns specified and no previous plot variables defined.")
+                    return
+
+                y_part = self.last_y if isinstance(self.last_y, list) else [self.last_y]
+                target_cols = [self.last_x] + y_part
+            else:
+                target_cols = cols if isinstance(cols, list) else [cols]
+
+            for ds in self.sets:
+                if not ds.select:
+                    continue
+
+                valid_cols = [c for c in target_cols if c in ds.df.columns]
+
+                if not valid_cols:
+                    continue
+
+                subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
+                subset.insert(0, 'Dataset', ds.title)
+                subset.insert(0, 'Set', ds.index)
+                combined_dfs.append(subset)
+
+            if not combined_dfs:
+                print("No data found for the specified columns in selected datasets.")
+                return
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
         final_df = final_df.fillna('-')
@@ -3959,7 +4016,7 @@ class UnichartNotebook:
         }
         fig.update_layout(**layout_args)
 
-        self.last_fig = fig                             # <-- so save_png works
+        self.last_fig = fig
         fig = self._apply_fonts(fig)
 
         display_df = final_df.copy()
