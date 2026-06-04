@@ -79,6 +79,23 @@ def marker_map(index):
     markers = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
     return markers[index % len(markers)]
 
+
+class CyclicList(list):
+    """A ``list`` whose *integer* indexing wraps around (cycles) modulo its
+    length, so a short map still answers any index:
+
+        >>> CyclicList(['a', 'b'])[3]
+        'b'
+
+    Slicing and all other list behavior are unchanged. An empty CyclicList
+    raises ``IndexError`` on integer access, like a normal empty list.
+    """
+
+    def __getitem__(self, index):
+        if isinstance(index, int) and len(self):
+            return super().__getitem__(index % len(self))
+        return super().__getitem__(index)
+
 def _generate_contour_grid(x_data, y_data, z_data, res=100, method='linear'):
     """
     Interpolates scattered x, y, z data into a uniform 2D grid for contour plotting.
@@ -317,10 +334,9 @@ class Dataset:
         self.index = index
         self.title_format = f"{self.title} {index}"
 
-        default_colors = px.colors.qualitative.Plotly
-        self._color = default_colors[index % len(default_colors)]
+        self._color = notebook._color_at(index)
 
-        self._marker = marker_map(index)
+        self._marker = notebook._marker_at(index)
         self._edge_color = "black"
         self._fill = True
         self._linestyle = None
@@ -1798,10 +1814,15 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
     return _show_or_return(fig, return_axes)
 
 def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers', notched=False,
+                         variable_formats=None,
                          suptitle=None, darkmode=False, figsize=(12, 8), axis_limits=None, return_axes=False):
     """
     Creates a single grouped box plot where the X-axis is the Dataset name,
     and the boxes are the different Y-variables, each scaled to their own Y-axis.
+
+    Each Y-variable is colored from the default palette unless a per-variable
+    ``variable_formats`` override supplies a ``color`` (and/or ``alpha``); the
+    override color also drives that variable's Y-axis title/tick color.
     """
     active_ds = [d for d in list_of_datasets if d.select]
     if not active_ds:
@@ -1810,6 +1831,7 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
 
     y_list = y if isinstance(y, list) else [y]
     axis_limits = axis_limits or {}
+    variable_formats = variable_formats or {}
     color_cycle = px.colors.qualitative.Plotly
 
     fig = go.Figure()
@@ -1817,14 +1839,16 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
     extras_count = max(0, len(y_list) - 2)
     width_per_axis = 0.08
     required_space = extras_count * width_per_axis
-    x_domain_end = max(0.5, 1.0 - required_space) 
+    x_domain_end = max(0.5, 1.0 - required_space)
 
     for idx_y, yi in enumerate(y_list):
-        var_color = color_cycle[idx_y % len(color_cycle)]
+        var_fmt = variable_formats.get(yi, {})
+        var_color = var_fmt.get('color') or color_cycle[idx_y % len(color_cycle)]
+        var_alpha = var_fmt.get('alpha')
 
         all_y_data = []
         all_x_labels = []
-        
+
         for ds in active_ds:
             if yi in ds.df.columns:
                 valid_data = ds.df[yi].dropna()
@@ -1838,7 +1862,7 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
 
         y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
 
-        fig.add_trace(go.Box(
+        box_kwargs = dict(
             name=yi,
             x=all_x_labels,
             y=all_y_data,
@@ -1847,7 +1871,10 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
             marker_color=var_color,
             boxpoints=points,
             notched=notched,
-        ))
+        )
+        if var_alpha is not None:
+            box_kwargs['opacity'] = var_alpha
+        fig.add_trace(go.Box(**box_kwargs))
 
         axis_layout = dict(
             title=yi,
@@ -2105,6 +2132,20 @@ class UnichartNotebook:
         # Per-variable formatting overrides (used by plot_ymult / uniplot_ymultaxis).
         # Shape: {variable_name: {attr: value}} where attr ∈ _VAR_FORMAT_KEYS.
         self.variable_formats = {}
+
+        # User-customizable color map: the ordered list of colors assigned to
+        # datasets by index, mirroring marker_map for markers. Replace it with
+        # your own list (e.g. nb.color_map = ['#FF0000', '#00FF00', ...]) to
+        # choose the colors new/reset datasets and integer color() lookups use.
+        # Integer indexing cycles, so nb.color_map[3] works on a 2-color map.
+        self.color_map = px.colors.qualitative.Plotly
+
+        # User-customizable marker map: the ordered list of marker symbols
+        # assigned to datasets by index (the marker analogue of color_map).
+        # Replace it with your own list (e.g. nb.marker_map = ['o', 's', '^'])
+        # to choose the markers new/reset datasets and integer marker() lookups
+        # use. Integer indexing cycles, so nb.marker_map[3] works on a 2-marker map.
+        self.marker_map = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
 
         self.suptitle_size = None
         self.legend_size = None
@@ -2401,11 +2442,16 @@ class UnichartNotebook:
 
         Accepts:
             None | 'all'    -> all datasets
-            int             -> dataset at that index
-            str             -> dataset(s) whose title matches exactly
+            int             -> dataset at that index (negative indices count
+                               from the end, so -1 is the last dataset)
             Dataset         -> wrapped in a list
             list            -> mixed list of any of the above
         Unknown inputs print a warning and return [].
+
+        Note: dataset titles are deliberately *not* accepted as selectors. A
+        bare string is reserved for variable/parameter targeting in the
+        formatting setters (see :meth:`_var_targets`), so titles would be
+        ambiguous here.
         """
         if uset_slice is None or uset_slice == 'all':
             return list(self.sets)
@@ -2414,15 +2460,9 @@ class UnichartNotebook:
             return [uset_slice]
 
         if isinstance(uset_slice, int) and not isinstance(uset_slice, bool):
-            if 0 <= uset_slice < len(self.sets):
+            if -len(self.sets) <= uset_slice < len(self.sets):
                 return [self.sets[uset_slice]]
             return []
-
-        if isinstance(uset_slice, str):
-            matches = [d for d in self.sets if d.title == uset_slice]
-            if not matches:
-                print(f"Warning: no dataset with title {uset_slice!r}.")
-            return matches
 
         if isinstance(uset_slice, (list, tuple, set)):
             result = []
@@ -2436,6 +2476,67 @@ class UnichartNotebook:
 
         print(f"Warning: don't know how to interpret {uset_slice!r} as a dataset selector.")
         return []
+
+    @staticmethod
+    def _var_targets(target):
+        """Autodetect whether a formatting-setter target names variable(s).
+
+        Dataset selectors are ints, ``'all'``/None, ``Dataset`` objects, or
+        lists thereof. Since titles are no longer valid selectors, a bare
+        string (other than ``'all'``) — or a list/tuple of such strings —
+        unambiguously denotes variable/parameter name(s).
+
+        Returns the list of variable names when ``target`` names variables,
+        otherwise ``None`` (meaning: treat as a dataset selector).
+        """
+        if isinstance(target, str) and target != 'all':
+            return [target]
+        if isinstance(target, (list, tuple)) and target and all(
+                isinstance(t, str) and t != 'all' for t in target):
+            return list(target)
+        return None
+
+    @property
+    def color_map(self):
+        """The dataset color sequence — a :class:`CyclicList`, so integer
+        indexing wraps (``color_map[3]`` works on a 2-color map). Assigning any
+        list (or palette sequence) coerces it to a CyclicList automatically.
+        """
+        return self._color_map
+
+    @color_map.setter
+    def color_map(self, value):
+        self._color_map = value if isinstance(value, CyclicList) else CyclicList(value)
+
+    def _color_at(self, index):
+        """Color assigned to a 0-based ``index``, cycling ``self.color_map``.
+
+        Parallels :meth:`_marker_at` for colors. Falls back to the default
+        Plotly palette if ``color_map`` has been set to an empty list.
+        """
+        cmap = self.color_map or CyclicList(px.colors.qualitative.Plotly)
+        return cmap[index]
+
+    @property
+    def marker_map(self):
+        """The dataset marker sequence — a :class:`CyclicList`, so integer
+        indexing wraps (``marker_map[3]`` works on a 2-marker map). Assigning any
+        list coerces it to a CyclicList automatically.
+        """
+        return self._marker_map
+
+    @marker_map.setter
+    def marker_map(self, value):
+        self._marker_map = value if isinstance(value, CyclicList) else CyclicList(value)
+
+    def _marker_at(self, index):
+        """Marker assigned to a 0-based ``index``, cycling ``self.marker_map``.
+
+        Falls back to the default marker set if ``marker_map`` has been set to
+        an empty list.
+        """
+        mmap = self.marker_map or CyclicList(MARKER_MAP_MPL_TO_PLOTLY.keys())
+        return mmap[index]
 
     def select(self, uset_slice=None):
         """Select the specified dataset(s)."""
@@ -2492,67 +2593,141 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Styling
     # ------------------------------------------------------------------
-    def color(self, uset_slice, color_val):
+    def color(self, uset_slice=None, color_val=None):
         """
-        Set the primary color for the specified dataset(s).
+        Set the primary color for the target dataset(s) or variable(s).
+
+        The target is autodetected: an int / list of ints / ``Dataset`` / 'all'
+        / None selects dataset(s); a variable/parameter name (or list of names)
+        applies a per-variable override via :meth:`var_format`, which takes
+        precedence over dataset formatting at plot time.
 
         Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            uset_slice (int, list, 'all', or str): Dataset selector, or
+                variable name(s) to target.
             color_val (str or int): A color spec, or an integer set index.
                 - str: a standard color name ('red'), hex code ('#FF5733'),
-                or RGB/RGBA string ('rgb(255, 0, 0)').
-                - int: resolves to the *default* palette color that set index
-                would have been assigned at load time, independent of any
-                recoloring that set has since received. E.g. color(5, 2)
-                gives set 5 the original color of set 2.
+                or RGB/RGBA string ('rgb(255, 0, 0)'). Pass ``'reset'`` when
+                targeting a variable to clear its color override.
+                - int: resolves to the color that set index would be assigned
+                from ``color_map`` at load time, independent of any recoloring
+                that set has since received. E.g. color(5, 2) gives set 5 the
+                ``color_map`` color of set 2.
+
+        Examples
+        --------
+        nb.color('all', 'red')              # every dataset red
+        nb.color(0, 'blue')                 # dataset 0 blue
+        nb.color('Temperature', 'blue')     # the Temperature variable blue
+        nb.color('Temperature', 'reset')    # clear that variable override
         """
         if isinstance(color_val, int) and not isinstance(color_val, bool):
-            default_colors = px.colors.qualitative.Plotly
-            color_val = default_colors[color_val % len(default_colors)]
+            color_val = self._color_at(color_val)
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, color=color_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.color = color_val
 
-    def marker(self, uset_slice, marker_val):
+    def marker(self, uset_slice=None, marker_val=None):
         """
-        Set the marker style for the specified dataset(s).
+        Set the marker style for the target dataset(s) or variable(s).
+
+        The target is autodetected: an int / list of ints / ``Dataset`` / 'all'
+        / None selects dataset(s); a variable/parameter name (or list of names)
+        applies a per-variable override via :meth:`var_format`, which takes
+        precedence over dataset formatting at plot time.
 
         Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
+            uset_slice (int, list, 'all', or str): Dataset selector, or
+                variable name(s) to target.
             marker_val (str or int): A marker spec, or an integer set index.
                 - str: Matplotlib-style marker ('o', 's', '^', 'D', '.')
-                or Plotly-style marker ('circle', 'square').
-                - int: resolves to the *default* marker that set index would have
-                been assigned at load time, independent of any later restyling.
-                E.g. marker(5, 2) gives set 5 the original marker of set 2.
+                or Plotly-style marker ('circle', 'square'). Pass ``'reset'``
+                when targeting a variable to clear its marker override.
+                - int: resolves to the marker that set index would be assigned
+                from ``marker_map`` at load time, independent of any later
+                restyling. E.g. marker(5, 2) gives set 5 the ``marker_map``
+                marker of set 2.
+
+        Examples
+        --------
+        nb.marker('all', 's')             # every dataset uses squares
+        nb.marker('Pressure', '^')        # the Pressure variable uses triangles
         """
         if isinstance(marker_val, int) and not isinstance(marker_val, bool):
-            marker_val = marker_map(marker_val)
+            marker_val = self._marker_at(marker_val)
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, marker=marker_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.marker = marker_val
 
-    def linestyle(self, uset_slice, style_val):
+    def linestyle(self, uset_slice=None, style_val=None):
         """
-        Set the line style for the specified dataset(s).
-        
+        Set the line style for the target dataset(s) or variable(s).
+
+        The target is autodetected: an int / list of ints / ``Dataset`` / 'all'
+        / None selects dataset(s); a variable/parameter name (or list of names)
+        applies a per-variable override via :meth:`var_format`, which takes
+        precedence over dataset formatting at plot time.
+
         Args:
-            uset_slice (int, list, or 'all'): The dataset index or indices to modify.
-            style_val (str): Matplotlib-style string ('-', '--', '-.', ':') 
+            uset_slice (int, list, 'all', or str): Dataset selector, or
+                variable name(s) to target.
+            style_val (str): Matplotlib-style string ('-', '--', '-.', ':')
                              or Plotly string ('solid', 'dash', 'dashdot', 'dot').
+                             Pass ``'reset'`` when targeting a variable to clear
+                             its linestyle override.
+
+        Examples
+        --------
+        nb.linestyle('all', '--')             # dash every dataset
+        nb.linestyle('Temperature', ':')      # dot the Temperature variable
         """
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, linestyle=style_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.linestyle = style_val
-            
-    def markersize(self, uset_slice, size_val):
+
+    def markersize(self, uset_slice=None, size_val=None):
         """
-        Set the marker size for the specified dataset(s).
+        Set the marker size for the target dataset(s) or variable(s).
+
+        The target is autodetected: a dataset selector (int / list / 'all' /
+        None / ``Dataset``) sets it per dataset; a variable/parameter name (or
+        list of names) applies a per-variable override via :meth:`var_format`.
+        Pass ``'reset'`` when targeting a variable to clear the override.
         """
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, markersize=size_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.markersize = size_val
-    
-    def linewidth(self, uset_slice, width_val):
+
+    def linewidth(self, uset_slice=None, width_val=None):
         """
-        Set the line thickness for the specified dataset(s).
+        Set the line thickness for the target dataset(s) or variable(s).
+
+        The target is autodetected: a dataset selector (int / list / 'all' /
+        None / ``Dataset``) sets it per dataset; a variable/parameter name (or
+        list of names) applies a per-variable override via :meth:`var_format`.
+        Pass ``'reset'`` when targeting a variable to clear the override.
         """
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, linewidth=width_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.linewidth = width_val
 
@@ -2593,10 +2768,20 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds.hue_palette = hue_palette
 
-    def alpha(self, uset_slice, alpha_val):
+    def alpha(self, uset_slice=None, alpha_val=None):
         """
-        Set the opacity (alpha) for the specified dataset(s).
+        Set the opacity (alpha) for the target dataset(s) or variable(s).
+
+        The target is autodetected: a dataset selector (int / list / 'all' /
+        None / ``Dataset``) sets it per dataset; a variable/parameter name (or
+        list of names) applies a per-variable override via :meth:`var_format`.
+        Pass ``'reset'`` when targeting a variable to clear the override.
         """
+        variables = self._var_targets(uset_slice)
+        if variables is not None:
+            for v in variables:
+                self.var_format(v, alpha=alpha_val)
+            return
         for ds in self._get_uset_slice(uset_slice):
             ds.alpha = alpha_val
 
@@ -2695,14 +2880,12 @@ class UnichartNotebook:
         nb.reset_format(lines=True, highlights=True, sets=False, vars=False,
                         scale=False, fonts=False)  # only clear decorations
         """
-        default_colors = px.colors.qualitative.Plotly
-
         if sets:
             targets = (self.sets if uset_slice is None
                        else self._get_uset_slice(uset_slice))
             for ds in targets:
-                ds._color     = default_colors[ds.index % len(default_colors)]
-                ds._marker    = marker_map(ds.index)
+                ds._color     = self._color_at(ds.index)
+                ds._marker    = self._marker_at(ds.index)
                 ds._linestyle = None
                 ds.markersize = 10
                 ds.linewidth  = 2
@@ -3208,18 +3391,27 @@ class UnichartNotebook:
         
     def scale(self, column, range_tuple):
         """
-        Set specific axis limits for a parameter.
+        Set specific axis limits for one or more parameters.
+
+        ``column`` may be a single parameter name or a list/tuple of names,
+        in which case the same ``range_tuple`` is applied to each.
         """
-        if range_tuple == 'clear' or range_tuple is None:
-            if column in self.axis_limits:
-                del self.axis_limits[column]
-                print(f"Limits cleared for '{column}'.")
+        if isinstance(column, (list, tuple)):
+            columns = column
         else:
-            if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
-                self.axis_limits[column] = range_tuple
-                print(f"Limits set for '{column}': {range_tuple}")
+            columns = [column]
+
+        for col in columns:
+            if range_tuple == 'clear' or range_tuple is None:
+                if col in self.axis_limits:
+                    del self.axis_limits[col]
+                    print(f"Limits cleared for '{col}'.")
             else:
-                raise ValueError(f"Invalid range for {column}. Must be a tuple (min, max).")
+                if isinstance(range_tuple, (list, tuple)) and len(range_tuple) == 2:
+                    self.axis_limits[col] = range_tuple
+                    print(f"Limits set for '{col}': {range_tuple}")
+                else:
+                    raise ValueError(f"Invalid range for {col}. Must be a tuple (min, max).")
 
     # ------------------------------------------------------------------
     # Font Management
@@ -3653,7 +3845,8 @@ class UnichartNotebook:
         if by == 'dataset_x':
             fig = unibox_datasets_as_x(
                 list_of_datasets=self.sets, y=y_list, boxmode=boxmode,
-                points=points, notched=notched, suptitle=suptitle or self.suptitle,
+                points=points, notched=notched, variable_formats=self.variable_formats,
+                suptitle=suptitle or self.suptitle,
                 figsize=figsize, darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
             if fig:
