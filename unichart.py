@@ -3361,17 +3361,34 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Axes Based Decorations (Lines/Highlights/Scale)
     # ------------------------------------------------------------------
-    def line(self, column, level, color='red', dash='dash'):
-        """Add a vertical or horizontal line to the next plot."""
+    def line(self, column, level, color='red', linestyle=None, dash=None):
+        """Add a vertical or horizontal line to the next plot.
+
+        Args:
+            column (str): The variable the line is keyed to (x-var -> vertical
+                line; y-var -> horizontal line). Use 'all' with level='clear'.
+            level (float or 'clear'): The line position, or 'clear' to remove
+                the line(s) for ``column`` ('all' clears every line).
+            color (str): Line color.
+            linestyle (str, optional): Line style — Matplotlib-style
+                ('-', '--', '-.', ':') or Plotly-style ('solid', 'dash',
+                'dashdot', 'dot'). Defaults to 'dash'.
+            dash (str, optional): Deprecated alias for ``linestyle``, kept for
+                backwards compatibility. Ignored if ``linestyle`` is given.
+        """
         if level == 'clear':
             if column == 'all':
                 self.lines.clear()
             else:
                 self.lines.pop(column, None)
             return
-        
+
+        # linestyle is the preferred name; dash is the legacy alias. When
+        # neither is supplied, preserve the original default of 'dash'.
+        style = linestyle if linestyle is not None else (dash if dash is not None else 'dash')
+
         if column not in self.lines: self.lines[column] = []
-        plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(dash, dash)
+        plotly_dash = LINESTYLE_MAP_MPL_TO_PLOTLY.get(style, style)
         self.lines[column].append({'level': level, 'color': color, 'dash': plotly_dash})
 
     def highlight(self, column, range_tuple, color='yellow', alpha=0.2, opacity=None):
