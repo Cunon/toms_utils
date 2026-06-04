@@ -907,6 +907,8 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             )
             line_dict = dict(width=cur_linewidth, dash=get_plotly_linestyle(cur_linestyle))
 
+            # Hue, when active, drives the per-point marker color and takes
+            # precedence over the set color / fill toggle below.
             if cur_hue and cur_hue in df.columns:
                 hue_data = df[cur_hue]
                 if pd.api.types.is_numeric_dtype(hue_data):
@@ -918,8 +920,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                     marker_dict['color'] = hue_series.cat.codes
                     marker_dict['colorscale'] = fmt.get('hue_palette', 'Jet')
                     marker_dict['showscale'] = False
-
-            if fmt.get('fill', True):
+            elif fmt.get('fill', True):
                 marker_dict['color'] = cur_color
             else:
                 # No fill: hollow marker whose outline takes the set color.
