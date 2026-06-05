@@ -4093,6 +4093,46 @@ class UnichartNotebook:
         return results
 
     # ------------------------------------------------------------------
+    # Column statistics
+    # ------------------------------------------------------------------
+    def _aggregate(self, uset_slice, column, func, name):
+        """Reduce ``column`` over the selected dataset(s) with ``func``.
+
+        Datasets are chosen with the usual selector (int / list / 'all' / None /
+        ``Dataset``). The query-masked ``column`` from every matching set is
+        concatenated, NaNs are dropped, and ``func`` is applied. With multiple
+        sets selected the statistic is computed over their combined values.
+        Returns a scalar, or ``None`` (with a message) when no data is found.
+        """
+        parts = [ds.df[column] for ds in self._get_uset_slice(uset_slice)
+                 if column in ds.df.columns]
+        if not parts:
+            print(f"{name}: column {column!r} not found in the selected dataset(s).")
+            return None
+        data = pd.concat(parts, ignore_index=True).dropna()
+        if data.empty:
+            print(f"{name}: no values for {column!r} in the selected dataset(s).")
+            return None
+        return func(data)
+
+    def max(self, uset_slice, column):
+        """Highest value of ``column`` in the selected dataset(s). E.g.
+        ``uc.max(6, 'T4F')`` returns the maximum of column T4F in set 6."""
+        return self._aggregate(uset_slice, column, lambda s: s.max(), 'max')
+
+    def min(self, uset_slice, column):
+        """Lowest value of ``column`` in the selected dataset(s)."""
+        return self._aggregate(uset_slice, column, lambda s: s.min(), 'min')
+
+    def mean(self, uset_slice, column):
+        """Mean of ``column`` in the selected dataset(s)."""
+        return self._aggregate(uset_slice, column, lambda s: s.mean(), 'mean')
+
+    def median(self, uset_slice, column):
+        """Median of ``column`` in the selected dataset(s)."""
+        return self._aggregate(uset_slice, column, lambda s: s.median(), 'median')
+
+    # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
     def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None, output=None):
@@ -4113,8 +4153,12 @@ class UnichartNotebook:
         matches the plotted curve. When no spec is set, values are interpolated
         piecewise-linearly through the raw points. Non-numeric y columns carry
         the value from the row whose x is nearest each requested x. An
-        ``INTERPOLATED`` column marks each row ``True`` when the x value is not
-        already present in the set and ``False`` when it is.
+        ``INTERPOLATED`` column marks each row ``True`` when the displayed value
+        was interpolated/fitted rather than taken directly from a raw point. A
+        ``METHOD`` column names how each value was produced: the regression type
+        (e.g. ``'Linear'``, ``'LS2'``, ``'Log'``) when a ``reg_order``/``kind``
+        spec is used, ``'Table'`` for 1-D table interpolation between raw points
+        (no spec), and ``None`` for exact, non-interpolated points.
 
         Output mode
         -----------
@@ -4161,6 +4205,15 @@ class UnichartNotebook:
                 spec = kind if kind is not None else ds.reg_order
                 existing = df[xc].to_numpy(dtype=float)
 
+                # Track whether any displayed numeric value was read off a
+                # fitted regression curve. When it was, the value comes from the
+                # model rather than a raw row, so the point is interpolated even
+                # if its x matches an existing data point. ``reg_label`` records
+                # the regression type (matching the plot label) for the METHOD
+                # column.
+                curve_used = False
+                reg_label = None
+
                 subset = pd.DataFrame({xc: x_arr})
                 for yc in valid_ycols:
                     if pd.api.types.is_numeric_dtype(df[yc]):
@@ -4168,10 +4221,12 @@ class UnichartNotebook:
                         # reg_order kind), reading values off the fitted curve.
                         # Fall back to piecewise-linear interpolation through the
                         # raw points when no regression spec is set.
-                        rx, ry, _ = (_calculate_regression(df, xc, yc, spec)
-                                     if spec else (None, None, None))
+                        rx, ry, fit_label = (_calculate_regression(df, xc, yc, spec)
+                                             if spec else (None, None, None))
                         if rx is not None:
                             subset[yc] = np.interp(x_arr, rx, ry)
+                            curve_used = True
+                            reg_label = fit_label
                         else:
                             subset[yc] = table_read(df, xc, yc, x_arr, kind='linear')
                     else:
@@ -4182,9 +4237,24 @@ class UnichartNotebook:
                         y_sorted = df[yc].to_numpy()[order]
                         nearest = np.abs(x_sorted[:, None] - x_arr[None, :]).argmin(axis=0)
                         subset[yc] = y_sorted[nearest]
-                subset['INTERPOLATED'] = [
-                    not np.any(np.isclose(existing, xv)) for xv in x_arr
-                ]
+                # A value read off a fitted curve is always interpolated.
+                # Otherwise (piecewise-linear through the raw points) a value is
+                # only interpolated when its x is not already in the dataset.
+                # METHOD records how each row's value was produced: the
+                # regression type for fitted curves, ``'Table'`` for 1-D table
+                # interpolation between raw points, and ``None`` for exact
+                # (non-interpolated) points.
+                if curve_used:
+                    subset['INTERPOLATED'] = True
+                    subset['METHOD'] = reg_label
+                else:
+                    interp_flags = [
+                        not np.any(np.isclose(existing, xv)) for xv in x_arr
+                    ]
+                    subset['INTERPOLATED'] = interp_flags
+                    subset['METHOD'] = [
+                        'Table' if flag else None for flag in interp_flags
+                    ]
                 subset.insert(0, 'Dataset', ds.title)
                 subset.insert(0, 'Set', ds.index)
                 combined_dfs.append(subset)
