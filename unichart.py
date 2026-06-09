@@ -3094,7 +3094,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     def delta(self, base_idx, study_indices, align_on=None, delta_parms=None,
               passed_parms=None, keep_parms=None,
-              direction='nearest', tolerance=None):
+              direction='nearest', tolerance=None,
+              x_ins=None, interp='both', kind=None):
         """Compute deltas (absolute and %) between each study dataset and the base.
 
         The resulting delta dataset is anchored on the BASE dataset's rows: every
@@ -3131,9 +3132,44 @@ class UnichartNotebook:
             None / False keeps no study values (only the deltas and base columns).
         direction : 'nearest' | 'forward' | 'backward'
             Passed to merge_asof — controls which study row matches each base row.
+            Only used in the default (non-``x_ins``) row-matching mode.
         tolerance : numeric | None
             Maximum allowed distance between matched align_on values. Unmatched rows get NaN.
+            Only used in the default (non-``x_ins``) row-matching mode.
+
+        Interpolation mode (``x_ins``)
+        ------------------------------
+        By default the result is anchored on the base dataset's rows, with each
+        study row matched by a nearest/forward/backward ``merge_asof``. Pass
+        ``x_ins`` (a scalar or list-like of ``align_on`` values) to instead place
+        the result rows at exactly those ``align_on`` values, reading the base
+        and/or study values off an interpolated curve at each point — mirroring
+        :meth:`table`'s interpolation.
+
+        x_ins : scalar | list | None
+            ``align_on`` values that define the rows of the new dataset. When
+            given, ``align_on`` must be numeric. ``None`` (default) keeps the
+            original ``merge_asof`` row-matching behaviour.
+        interp : 'base' | 'study' | 'both'
+            Which side(s) to interpolate onto ``x_ins`` (default ``'both'``).
+            The non-selected side — and any non-numeric column on either side —
+            is read from the row whose ``align_on`` is nearest each requested
+            value. Note every column of an interpolated side is fitted, including
+            base context columns that are not delta parameters, since the whole
+            row is synthetic.
+        kind : str | tuple | None
+            Regression/interpolation spec applied to the interpolated side(s),
+            accepting the same specs as ``reg_order`` (e.g. ``'poly2'``, ``'log'``,
+            ``'exp'``, ``'power'``, ``(kind, param)`` tuples). When ``None`` each
+            side falls back to its own dataset's ``reg_order``; when no spec is
+            set at all, values are interpolated piecewise-linearly through the raw
+            points. The result gains ``BASE_METHOD`` / ``STUDY_METHOD`` columns
+            naming how each side's numeric values were produced (the regression
+            label, ``'Table'`` for 1-D linear interpolation, or ``'Nearest'``).
+            Only used when ``x_ins`` is given.
         """
+        if x_ins is not None and interp not in ('base', 'study', 'both'):
+            raise ValueError("interp must be 'base', 'study', or 'both'.")
         # Resolve align_on from last plot state
         if align_on is None:
             lx = self.last_x
@@ -3187,6 +3223,33 @@ class UnichartNotebook:
         base_ds = self.sets[base_idx]
         if align_on not in base_ds.df.columns:
             raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
+        if x_ins is not None and not pd.api.types.is_numeric_dtype(base_ds.df[align_on]):
+            raise ValueError(
+                f"x_ins interpolation requires a numeric align_on; '{align_on}' is "
+                f"not numeric in base dataset '{base_ds.title}'.")
+
+        def _read_col_at(src_df, xcol, ycol, x_arr, do_interp, spec):
+            """Read ``ycol`` from ``src_df`` at the ``x_arr`` positions of ``xcol``.
+
+            Numeric columns on an interpolated side are read off the regression
+            curve (``spec``) when one fits, else by 1-D linear interpolation
+            through the raw points. Non-numeric columns, and any column on a
+            non-interpolated side, carry the value from the row whose ``xcol`` is
+            nearest each requested point. Returns ``(values, method_label)``.
+            """
+            col = src_df[ycol]
+            if do_interp and pd.api.types.is_numeric_dtype(col):
+                rx, ry, fit_label = (_calculate_regression(src_df, xcol, ycol, spec)
+                                     if spec else (None, None, None))
+                if rx is not None:
+                    return np.interp(x_arr, rx, ry), fit_label
+                return table_read(src_df, xcol, ycol, x_arr, kind='linear'), 'Table'
+            existing = src_df[xcol].to_numpy(dtype=float)
+            order = np.argsort(existing)
+            x_sorted = existing[order]
+            y_sorted = col.to_numpy()[order]
+            nearest = np.abs(x_sorted[:, None] - x_arr[None, :]).argmin(axis=0)
+            return y_sorted[nearest], 'Nearest'
 
         # Exclude the base from study targets to avoid a trivial zero-delta set
         targets = [ds for ds in self._get_uset_slice(study_indices) if ds.index != base_idx]
@@ -3199,6 +3262,10 @@ class UnichartNotebook:
         for study_ds in targets:
             if align_on not in study_ds.df.columns:
                 print(f"Warning: skipping '{study_ds.title}' — align_on column '{align_on}' not found.")
+                continue
+            if x_ins is not None and not pd.api.types.is_numeric_dtype(study_ds.df[align_on]):
+                print(f"Warning: skipping '{study_ds.title}' — x_ins interpolation needs a "
+                      f"numeric align_on, but '{align_on}' is not numeric there.")
                 continue
 
             valid_parms = [p for p in delta_parms
@@ -3229,6 +3296,16 @@ class UnichartNotebook:
             base_df = base_ds.df.loc[:, ~base_ds.df.columns.duplicated()]
             df_base = base_df.sort_values(align_on).reset_index(drop=True)
 
+            # All sets share one combined frame, so this set's view carries an
+            # all-NaN column for every column introduced by *other* sets (e.g. the
+            # DL_/DLPCT_/METHOD outputs of a previous delta). Drop those phantom
+            # columns so they are not carried into the result as empty context —
+            # but never drop the align key or an actual delta parameter.
+            phantom = [c for c in df_base.columns
+                       if c != align_on and c not in valid_parms and df_base[c].isna().all()]
+            if phantom:
+                df_base = df_base.drop(columns=phantom)
+
             # --- Study side: align_on + (delta parms ∪ passthroughs), renamed *_STUDY. ---
             study_df = study_ds.df.loc[:, ~study_ds.df.columns.duplicated()]
             study_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
@@ -3244,10 +3321,41 @@ class UnichartNotebook:
                       f"dropped in favor of study values: {sorted(overlap)}")
                 df_base = df_base.drop(columns=list(overlap))
 
-            merge_kwargs = dict(on=align_on, direction=direction)
-            if tolerance is not None:
-                merge_kwargs['tolerance'] = tolerance
-            merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
+            # Build `merged`: align_on + base columns (original names) + study
+            # columns (renamed *_STUDY). Two ways to populate it, both yielding
+            # the same column shape so the delta math below is shared:
+            #   - default: nearest/forward/backward merge_asof on the base rows.
+            #   - x_ins:   rows at the requested align_on values, each side read
+            #              off an interpolated curve (or nearest raw row).
+            base_methods = study_methods = None
+            if x_ins is None:
+                merge_kwargs = dict(on=align_on, direction=direction)
+                if tolerance is not None:
+                    merge_kwargs['tolerance'] = tolerance
+                merged = pd.merge_asof(df_base, df_study, **merge_kwargs)
+            else:
+                x_arr = np.atleast_1d(x_ins).astype(float)
+                base_spec = kind if kind is not None else base_ds.reg_order
+                study_spec = kind if kind is not None else study_ds.reg_order
+                base_interp = interp in ('base', 'both')
+                study_interp = interp in ('study', 'both')
+
+                merged = pd.DataFrame({align_on: x_arr})
+                base_methods, study_methods = set(), set()
+                for c in df_base.columns:
+                    if c == align_on:
+                        continue
+                    merged[c], m = _read_col_at(
+                        df_base, align_on, c, x_arr, base_interp, base_spec)
+                    if pd.api.types.is_numeric_dtype(df_base[c]):
+                        base_methods.add(m)
+                for c in df_study.columns:
+                    if c == align_on:
+                        continue
+                    merged[c], m = _read_col_at(
+                        df_study, align_on, c, x_arr, study_interp, study_spec)
+                    if pd.api.types.is_numeric_dtype(df_study[c]):
+                        study_methods.add(m)
 
             # Only parms that are numeric on BOTH sides can be subtracted. Anything
             # else (strings, categoricals, datetimes, object dtype) is carried
@@ -3310,6 +3418,12 @@ class UnichartNotebook:
                 if s_col not in result.columns:
                     result[s_col] = merged[s_col]
 
+            # On the x_ins path, every row is synthetic: record how each side's
+            # numeric values were produced (regression label / 'Table' / 'Nearest').
+            if x_ins is not None:
+                result['BASE_METHOD'] = '/'.join(sorted(base_methods)) if base_methods else 'Nearest'
+                result['STUDY_METHOD'] = '/'.join(sorted(study_methods)) if study_methods else 'Nearest'
+
             if numeric_parms:
                 nan_frac = result[f"DL_{numeric_parms[0]}"].isna().mean()
                 if nan_frac > 0.5:
@@ -3320,6 +3434,9 @@ class UnichartNotebook:
             ds = self._register_set(result, new_title)
             ds.set_type = 'delta'
             ds.delta_sets = {'base': base_ds.index, 'study': study_ds.index}
+            if x_ins is not None:
+                ds.delta_sets['x_ins'] = [float(v) for v in x_arr]
+                ds.delta_sets['interp'] = interp
             print(f"Loaded Set {ds.index}: {new_title}")
             created.append(ds)
 
@@ -4135,42 +4252,103 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The table Command
     # ------------------------------------------------------------------
-    def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None, output=None):
+    def table(self, cols=None, title=None, x_col=None, x_in=None, kind=None,
+              sig_figs=None, output=None):
         """
-        Display a Plotly Table of specific columns from selected datasets.
+        Build a table of column values from the currently selected datasets.
 
-        Interpolation mode
-        ------------------
-        Pass ``x_in`` (a scalar or list-like of x values) together with an
-        ``x_col`` (defaults to ``self.last_x``) to build the table from
-        interpolated values instead of the raw rows. For each selected dataset
-        the y column(s) — taken from ``cols`` (or ``self.last_y``) — are
-        read off the fitted curve at every value in ``x_in``. The regression
-        spec is taken from ``kind`` if given, otherwise the dataset's
-        ``reg_order``; ``kind`` accepts the *same* specs as ``reg_order`` (e.g.
-        ``'poly2'``, ``'log'``, ``'exp'``, ``'power'``, ``'spline'``,
-        ``'lowess'``, ``'ma'``, or ``(kind, param)`` tuples), so the table
-        matches the plotted curve. When no spec is set, values are interpolated
-        piecewise-linearly through the raw points. Non-numeric y columns carry
-        the value from the row whose x is nearest each requested x. An
-        ``INTERPOLATED`` column marks each row ``True`` when the displayed value
-        was interpolated/fitted rather than taken directly from a raw point. A
-        ``METHOD`` column names how each value was produced: the regression type
-        (e.g. ``'Linear'``, ``'LS2'``, ``'Log'``) when a ``reg_order``/``kind``
-        spec is used, ``'Table'`` for 1-D table interpolation between raw points
-        (no spec), and ``None`` for exact, non-interpolated points.
+        The method has two modes:
 
-        Output mode
-        -----------
-        ``output`` controls what the method produces:
+        * **Raw mode** (default) — show the actual rows from each dataset.
+        * **Interpolation mode** (when ``x_in`` is given) — show y values
+          looked up at the x values you ask for, interpolating or extrapolating
+          as needed so they line up with the plotted curve.
 
-        - ``None`` (default): render and display the styled HTML table.
-        - ``'df'``: return the assembled :class:`pandas.DataFrame` without
-          displaying anything.
-        - ``'md'``: return the table as a GitHub-flavored Markdown string.
+        Parameters
+        ----------
+        cols : str or list of str, optional
+            Column(s) to include. Defaults to the columns from the last plot
+            (``self.last_x`` + ``self.last_y``). In interpolation mode these are
+            the y column(s) to look up.
+        title : str, optional
+            Reserved for a table title (currently unused).
+        x_col : str, optional
+            The x column to interpolate against. Defaults to ``self.last_x``.
+            Only used in interpolation mode.
+        x_in : scalar or list-like, optional
+            One or more x values to look up. Supplying this switches the method
+            into interpolation mode.
+        kind : str or tuple, optional
+            Regression/curve spec used for the lookup, accepting the same values
+            as a dataset's ``reg_order`` (e.g. ``'poly2'``, ``'log'``, ``'exp'``,
+            ``'power'``, ``'spline'``, ``'lowess'``, ``'ma'``, or
+            ``(kind, param)`` tuples). Defaults to each dataset's own
+            ``reg_order`` so the table matches the plotted curve. When no spec is
+            set, values are interpolated piecewise-linearly through the raw
+            points.
+        sig_figs : int, optional
+            Round every float column to this many significant figures for
+            display, keeping ordinary decimal notation (no scientific notation).
+            Affects the rendered HTML table and Markdown output only; the
+            ``output='df'`` DataFrame keeps its full-precision numeric values.
+        output : {None, 'df', 'md'}, optional
+            What to return:
+
+            - ``None`` (default): render and display the styled HTML table.
+            - ``'df'``: return the assembled :class:`pandas.DataFrame`.
+            - ``'md'``: return a GitHub-flavored Markdown string.
+
+        Interpolation mode details
+        --------------------------
+        For each selected dataset, every numeric y column is evaluated at each
+        value in ``x_in``. Non-numeric y columns instead carry the value from
+        the row whose x is nearest the requested x. Two extra columns describe
+        each looked-up value:
+
+        ``INTERPOLATED``
+            Where the requested x sits relative to the raw data:
+
+            - ``'In set'`` — x matches an existing data point.
+            - ``'Interpolated'`` — x falls between raw points.
+            - ``'Extrapolated'`` — x falls outside the data range.
+
+            Values read off a fitted curve never come from a raw point, so they
+            are only ever ``'Interpolated'`` or ``'Extrapolated'``.
+
+        ``METHOD``
+            How the value was produced:
+
+            - the regression type (e.g. ``'Linear'``, ``'LS2'``, ``'Log'``) when
+              a ``reg_order``/``kind`` spec is used,
+            - ``'1d interp vs <x_col>'`` for piecewise-linear table
+              interpolation between raw points (no spec),
+            - ``None`` for exact, in-set points.
+
+        Examples
+        --------
+        Show the raw columns from the last plot::
+
+            chart.table()
+
+        Show specific columns::
+
+            chart.table(cols=['speed', 'power'])
+
+        Look up ``power`` at a few speeds using each dataset's fitted curve::
+
+            chart.table(cols='power', x_col='speed', x_in=[10, 15, 20])
+
+        Force a quadratic fit and return the result as a DataFrame::
+
+            df = chart.table(cols='power', x_in=[10, 15, 20],
+                             kind='poly2', output='df')
         """
         if output is not None and output not in ('df', 'md'):
             print(f"Unknown output mode '{output}'. Use None, 'df', or 'md'.")
+            return
+        if sig_figs is not None and (not isinstance(sig_figs, int) or
+                                     isinstance(sig_figs, bool) or sig_figs < 1):
+            print("sig_figs must be a positive integer.")
             return
         combined_dfs = []
 
@@ -4237,23 +4415,38 @@ class UnichartNotebook:
                         y_sorted = df[yc].to_numpy()[order]
                         nearest = np.abs(x_sorted[:, None] - x_arr[None, :]).argmin(axis=0)
                         subset[yc] = y_sorted[nearest]
-                # A value read off a fitted curve is always interpolated.
-                # Otherwise (piecewise-linear through the raw points) a value is
-                # only interpolated when its x is not already in the dataset.
+                # INTERPOLATED classifies each requested x relative to the
+                # dataset: ``'In set'`` when x matches an existing data point,
+                # ``'Extrapolated'`` when x falls outside the data range, and
+                # ``'Interpolated'`` when x falls between raw points. A value
+                # read off a fitted curve never comes from a raw point, so it is
+                # only ever ``'Interpolated'`` or ``'Extrapolated'``.
                 # METHOD records how each row's value was produced: the
-                # regression type for fitted curves, ``'Table'`` for 1-D table
-                # interpolation between raw points, and ``None`` for exact
-                # (non-interpolated) points.
+                # regression type for fitted curves, ``'1d interp vs <x_col>'``
+                # for 1-D table interpolation between raw points, and ``None``
+                # for exact (in-set) points.
+                xmin = np.nanmin(existing)
+                xmax = np.nanmax(existing)
                 if curve_used:
-                    subset['INTERPOLATED'] = True
+                    subset['INTERPOLATED'] = [
+                        'Extrapolated' if (xv < xmin or xv > xmax)
+                        else 'Interpolated'
+                        for xv in x_arr
+                    ]
                     subset['METHOD'] = reg_label
                 else:
-                    interp_flags = [
-                        not np.any(np.isclose(existing, xv)) for xv in x_arr
-                    ]
-                    subset['INTERPOLATED'] = interp_flags
+                    status = []
+                    for xv in x_arr:
+                        if np.any(np.isclose(existing, xv)):
+                            status.append('In set')
+                        elif xv < xmin or xv > xmax:
+                            status.append('Extrapolated')
+                        else:
+                            status.append('Interpolated')
+                    subset['INTERPOLATED'] = status
                     subset['METHOD'] = [
-                        'Table' if flag else None for flag in interp_flags
+                        None if s == 'In set' else f"1d interp vs {xc}"
+                        for s in status
                     ]
                 subset.insert(0, 'Dataset', ds.title)
                 subset.insert(0, 'Set', ds.index)
@@ -4292,10 +4485,34 @@ class UnichartNotebook:
                 return
 
         final_df = pd.concat(combined_dfs, ignore_index=True)
+
+        # Capture float columns before fillna (which can turn columns
+        # containing NaN into object dtype) so sig_figs formatting below knows
+        # which columns to round.
+        float_cols = (list(final_df.select_dtypes(include='float').columns)
+                      if sig_figs is not None else [])
+
         final_df = final_df.fillna('-')
 
         if output == 'df':
             return final_df
+
+        if sig_figs is not None:
+            def _to_sig(v):
+                # Round to sig_figs significant figures, rendered as a plain
+                # decimal string (never scientific notation). Non-floats (e.g.
+                # the '-' fill value or string columns) pass through unchanged.
+                if not isinstance(v, float) or not np.isfinite(v):
+                    return v
+                if v == 0:
+                    return f"{0:.{sig_figs - 1}f}"
+                digits = sig_figs - int(np.floor(np.log10(abs(v)))) - 1
+                if digits <= 0:
+                    return f"{round(v, digits):.0f}"
+                return f"{v:.{digits}f}"
+
+            for c in float_cols:
+                final_df[c] = final_df[c].map(_to_sig)
 
         if output == 'md':
             try:
