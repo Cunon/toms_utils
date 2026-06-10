@@ -1539,11 +1539,75 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
 
     return _show_or_return(fig, return_axes)
 
+def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmode):
+    """Draw each overlay dataset's ``(x, y)`` on top of every contour subplot.
+
+    Used by the contour builders to lay discrete sample points — or, when a set
+    has a ``linestyle``, a connected boundary line — over the interpolated
+    field. The same overlay sets are repeated on all ``n_subplots`` cells
+    (contour subplots share the same x/y axes), added *after* the contour traces
+    so they sit above an opaque ``contours_coloring='fill'``.
+
+    Each set keeps its own plot style: ``color``, ``marker``, ``markersize``,
+    ``linestyle``/``linewidth``, ``alpha``, and ``fill`` (hollow markers when
+    off). The mode mirrors :func:`uniplot` — a set with a ``linestyle`` draws as
+    a line (so it can trace a contour boundary), otherwise as markers. Points
+    are connected in the set's own order (its ``order`` column when set, else
+    row order), so an explicitly drawn boundary keeps its shape; regression
+    fits are not applied. The legend entry shows once (first subplot), grouped
+    per dataset.
+    """
+    if not overlay_datasets:
+        return
+
+    edge_default = 'white' if darkmode else 'black'
+
+    for cell in range(n_subplots):
+        row, col = (cell // ncols) + 1, (cell % ncols) + 1
+        for ds in overlay_datasets:
+            df = ds.df
+            if x not in df.columns or y not in df.columns:
+                continue
+
+            # Connect points in the set's own order so a hand-drawn boundary
+            # keeps its shape (an `order` column if set, else original rows).
+            if ds.order and ds.order != 'index' and ds.order in df.columns:
+                df = df.sort_values(by=ds.order)
+
+            # A linestyle means "draw a line" (trace a boundary); markers show
+            # unless the set is line-only.
+            want_lines = bool(ds.linestyle)
+            want_markers = bool(ds.marker) or not want_lines
+            mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers)
+
+            marker_dict = dict(
+                symbol=get_plotly_marker(ds.marker),
+                size=ds.markersize,
+                color=ds.color if ds.fill else 'rgba(0,0,0,0)',
+                line=dict(width=ds.edgewidth,
+                          color=ds.color if not ds.fill
+                          else (ds.edge_color or edge_default)),
+            )
+
+            fig.add_trace(go.Scatter(
+                x=df[x], y=df[y],
+                mode=mode,
+                name=f"{ds.index}: {ds.title}",
+                legendgroup=f"overlay_{ds.index}",
+                marker=marker_dict,
+                line=dict(width=ds.linewidth, color=ds.color,
+                          dash=get_plotly_linestyle(ds.linestyle)),
+                opacity=ds.alpha,
+                showlegend=(cell == 0),
+                hovertemplate=(f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>"
+                               f"{y}: %{{y:.3g}}<extra></extra>")
+            ), row=row, col=col)
+
 def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                interpolate=True, interp_res=100, interp_method='linear',
-               ncontours=None, 
+               ncontours=None, overlay_datasets=None,
                suptitle=None, xlabel=None, ylabel=None, subplot_titles=None,
-               darkmode=False, figsize=(12, 8), ncols=None, nrows=None, 
+               darkmode=False, figsize=(12, 8), ncols=None, nrows=None,
                axis_limits=None, return_axes=False):
     """
     Create a unified contour plot for a list of datasets.
@@ -1630,6 +1694,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
                 hovertemplate=f"<b>{ds.title}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>{zi}: %{{z:.3g}}<extra></extra>"
             ), row=row, col=col)
 
+    _add_contour_overlays(fig, overlay_datasets, x, y, n_z, ncols, darkmode)
+
     fig.update_xaxes(title_text=xlabel or x)
     fig.update_yaxes(title_text=ylabel or y)
 
@@ -1637,8 +1703,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
 
 def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=None,
                            interpolate=True, interp_res=100, interp_method='linear',
-                           ncontours=None,
-                           suptitle=None, figsize=(12, 8), ncols=None, nrows=None, 
+                           ncontours=None, overlay_datasets=None,
+                           suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
                            darkmode=False, axis_limits=None, return_axes=False):
     """
     Contour plot where Subplots are organized by Dataset.
@@ -1719,6 +1785,8 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
                 ),
                 hovertemplate=f"<b>{zi}</b><br>{x}: %{{x:.3g}}<br>{y}: %{{y:.3g}}<br>Value: %{{z:.3g}}<extra></extra>"
             ), row=row, col=col)
+
+    _add_contour_overlays(fig, overlay_datasets, x, y, n_sets, ncols, darkmode)
 
     fig.update_xaxes(title_text=x)
     fig.update_yaxes(title_text=y)
@@ -4120,35 +4188,47 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The contour Command
     # ------------------------------------------------------------------
-    def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill', 
+    def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill',
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
-                    ncontours=None,
+                    ncontours=None, overlay_sets=None,
                     suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Contour Plots.
+
+        ``overlay_sets`` selects dataset(s) — using the usual selector (int /
+        list / 'all' / ``Dataset``) — whose ``(x, y)`` data is drawn on top of
+        the contour, honoring each set's full plot style. A set with a
+        ``linestyle`` is drawn as a connected line (so it can trace a boundary
+        over the field); otherwise its points show as markers. Color, marker,
+        size, linewidth and ``fill`` are all respected. The same overlay sets
+        are drawn on every subplot (including ``by='sets'``, where each subplot
+        is a different dataset). Defaults to ``None`` (no overlay).
         """
         self._clear_last_fig()
 
         if x is None: x = self.last_x
         if y is None: y = self.last_y
-        if z is None: z = getattr(self, 'last_z', None) 
-        
+        if z is None: z = getattr(self, 'last_z', None)
+
         self.last_x, self.last_y, self.last_z = x, y, z
 
         if z is None:
             print("Error: Contour plots require a 'z' variable to map to color.")
             return
 
+        overlay_datasets = (self._get_uset_slice(overlay_sets)
+                            if overlay_sets is not None else [])
+
         limit_x = self.axis_limits.get(x)
         limit_y = self.axis_limits.get(y)
 
         if by in ['sets', 'datasets']:
             fig = unicontour_per_dataset(
-                list_of_datasets=self.sets, x=x, y=y, z=z, 
+                list_of_datasets=self.sets, x=x, y=y, z=z,
                 contours_coloring=contours_coloring, colorscale=colorscale,
                 interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                ncontours=ncontours,
-                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                ncontours=ncontours, overlay_datasets=overlay_datasets,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
         else:
@@ -4156,8 +4236,8 @@ class UnichartNotebook:
                 list_of_datasets=self.sets, x=x, y=y, z=z,
                 contours_coloring=contours_coloring, colorscale=colorscale,
                 interpolate=interpolate, interp_res=interp_res, interp_method=interp_method,
-                ncontours=ncontours,
-                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows, 
+                ncontours=ncontours, overlay_datasets=overlay_datasets,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
             
