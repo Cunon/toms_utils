@@ -208,6 +208,24 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
 
 _SET_ID_COL = '_SET_ID'
 
+# Above this many points a scatter trace renders with WebGL (go.Scattergl)
+# instead of SVG — SVG creates one DOM node per point and locks the browser
+# on dense transient data. Set to None to always use SVG.
+WEBGL_POINT_THRESHOLD = 10_000
+
+
+def _scatter_cls(n_points):
+    """Trace class for a scatter of ``n_points``: Scattergl past the WebGL
+    threshold, plain Scatter below it (or when the threshold is disabled)."""
+    if WEBGL_POINT_THRESHOLD is None:
+        return go.Scatter
+    return go.Scattergl if n_points > WEBGL_POINT_THRESHOLD else go.Scatter
+
+
+def _data_col_indexer(cdf):
+    """Integer positions of every combined-frame column except _SET_ID."""
+    return np.flatnonzero(cdf.columns.to_numpy() != _SET_ID_COL)
+
 
 class _DatasetFrameView:
     """Mutable per-set view onto a UnichartNotebook's combined DataFrame.
@@ -222,9 +240,10 @@ class _DatasetFrameView:
         self._dataset = dataset
 
     def _slice(self):
-        cdf = self._dataset._notebook._combined_df
-        rows = cdf.loc[cdf[_SET_ID_COL] == self._dataset._set_id]
-        return rows.drop(columns=_SET_ID_COL, errors='ignore')
+        nb = self._dataset._notebook
+        cdf = nb._combined_df
+        pos = nb._set_positions(self._dataset._set_id)
+        return cdf.iloc[pos, _data_col_indexer(cdf)]
 
     def __getitem__(self, key):
         return self._slice()[key]
@@ -325,9 +344,10 @@ class Dataset:
         if title:
             self.title = title
         else:
-            raw = self._raw_df()
-            if "TITLE" in raw.columns and not raw["TITLE"].empty:
-                self.title = str(raw["TITLE"].iloc[0])
+            cdf = notebook._combined_df
+            pos = notebook._set_positions(set_id)
+            if "TITLE" in cdf.columns and len(pos):
+                self.title = str(cdf["TITLE"].iloc[pos[0]])
             else:
                 self.title = "Untitled"
 
@@ -360,12 +380,53 @@ class Dataset:
     def _raw_df(self):
         """All rows for this set, unmasked, with _SET_ID stripped."""
         cdf = self._notebook._combined_df
-        rows = cdf.loc[cdf[_SET_ID_COL] == self._set_id]
-        return rows.drop(columns=_SET_ID_COL, errors='ignore')
+        pos = self._notebook._set_positions(self._set_id)
+        return cdf.iloc[pos, _data_col_indexer(cdf)]
+
+    def _masked_positions(self):
+        """Integer row positions of this set in the combined frame, with the
+        query mask applied. Positions come from the notebook's per-set cache,
+        so no full-column scan or full-width row copy is needed."""
+        pos = self._notebook._set_positions(self._set_id)
+        if self._query_mask is not None:
+            cdf = self._notebook._combined_df
+            qm = self._query_mask.reindex(cdf.index, fill_value=False).to_numpy()
+            pos = pos[qm[pos]]
+        return pos
+
+    @property
+    def columns(self):
+        """Column labels visible to this set (the combined frame's columns,
+        minus _SET_ID) — without materializing any rows."""
+        return self._notebook._combined_df.columns.drop(_SET_ID_COL, errors='ignore')
+
+    def cols(self, keys, masked=True):
+        """Rows of just the requested column(s) — far cheaper than ``self.df[keys]``
+        on wide frames, since only the named columns are copied. Missing keys are
+        silently skipped; duplicated column labels keep their first occurrence
+        (matching the plotters' dedup behavior). Returns a fresh copy.
+        """
+        cdf = self._notebook._combined_df
+        if not isinstance(keys, (list, tuple)):
+            keys = [keys]
+        col_pos = []
+        for k in dict.fromkeys(keys):
+            locs = cdf.columns.get_indexer_for([k])
+            locs = locs[locs >= 0]
+            if len(locs):
+                col_pos.append(locs[0])
+        pos = (self._masked_positions() if masked
+               else self._notebook._set_positions(self._set_id))
+        return cdf.iloc[pos, col_pos]
 
     def __getitem__(self, key):
-        """Read a column (or columns) for this set, e.g. ``ds['FN']``."""
-        return self.df[key]
+        """Read a column (or columns) for this set, e.g. ``ds['FN']``.
+
+        Copies only the requested column(s), not the full set width.
+        """
+        if isinstance(key, list):
+            return self.cols(key)
+        return self._notebook._combined_df[key].iloc[self._masked_positions()]
 
     def __setitem__(self, key, value):
         """Write a column back into the combined frame for this set.
@@ -382,7 +443,7 @@ class Dataset:
 
     @order.setter
     def order(self, value):
-        if value is None or value in self._raw_df().columns:
+        if value is None or value in self.columns:
             self._order = value
         else:
             raise ValueError(f"Invalid order column: {value}")
@@ -395,13 +456,7 @@ class Dataset:
         use ``ds['col'] = ...`` (or ``nb.set_column``) to write back.
         """
         cdf = self._notebook._combined_df
-        set_mask = (cdf[_SET_ID_COL] == self._set_id)
-        if self._query_mask is not None:
-            qm = self._query_mask.reindex(cdf.index, fill_value=False)
-            rows = cdf.loc[set_mask & qm]
-        else:
-            rows = cdf.loc[set_mask]
-        return rows.drop(columns=_SET_ID_COL, errors='ignore')
+        return cdf.iloc[self._masked_positions(), _data_col_indexer(cdf)]
 
     @df.setter
     def df(self, value):
@@ -431,7 +486,7 @@ class Dataset:
         if not self._query:
             self._query_mask = None
             return
-        set_rows = cdf.loc[cdf[_SET_ID_COL] == self._set_id]
+        set_rows = cdf.iloc[self._notebook._set_positions(self._set_id)]
         try:
             filtered = set_rows.query(self._query)
         except Exception as e:
@@ -802,8 +857,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         _fmt = _ds.get_format_dict()
         _cur_hue = _fmt.get('hue') or hue
         if not _cur_hue or _cur_hue in numeric_hue_info: continue
-        _df = _ds.df
-        if _cur_hue in _df.columns and pd.api.types.is_numeric_dtype(_df[_cur_hue]):
+        if _cur_hue in _ds.columns and pd.api.types.is_numeric_dtype(_ds[_cur_hue]):
             _idx = len(numeric_hue_info) + 1
             numeric_hue_info[_cur_hue] = {
                 'ca_name': 'coloraxis' if _idx == 1 else f'coloraxis{_idx}',
@@ -824,8 +878,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     for dataset in list_of_datasets:
         if not dataset.select: continue
 
-        base_df = dataset.df
-
         fmt = dataset.get_format_dict()
         cur_title = fmt.get('title')
         cur_hue = fmt.get('hue') or hue
@@ -839,59 +891,61 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         cur_idx = fmt.get('index')
         hover_parms = display_parms or fmt.get('display_parms', [])
 
-        base_cols = base_df.columns
+        base_cols = dataset.columns
         cols_upper = None  # built lazily on first case-insensitive miss
         valid_hover = [p for p in hover_parms if p in base_cols]
         hue_in_cols = bool(cur_hue) and cur_hue in base_cols
         ds_order = dataset.order
         order_in_cols = bool(ds_order) and ds_order != 'index' and ds_order in base_cols
-        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
-        if ds_order == 'index':
-            sorted_base_df = sorted_base_df.sort_index()
-        elif order_in_cols:
-            sorted_base_df = sorted_base_df.sort_values(by=ds_order)
-        else:
-            sorted_base_df = sorted_base_df.sort_index()
 
+        # Resolve every pair's columns up front so the set can be fetched —
+        # and sorted — once as a narrow frame. Sorting the full set width to
+        # plot a handful of columns dominated plot time on wide frames.
+        resolved_pairs = []
         for idx_p, (x_name, yi) in enumerate(pairs):
-            row = idx_p // ncols + 1
-            col = idx_p % ncols + 1
-
             if yi not in base_cols: continue
-
             if x_name in base_cols:
                 x_col = x_name
             else:
                 if cols_upper is None:
                     cols_upper = {c.upper(): c for c in base_cols}
-                x_key = cols_upper.get(str(x_name).upper())
-                if not x_key: continue
-                x_col = x_key
+                x_col = cols_upper.get(str(x_name).upper())
+                if not x_col: continue
+            resolved_pairs.append((idx_p, x_col, yi))
+        if not resolved_pairs: continue
+
+        needed = []
+        for _, x_col, yi in resolved_pairs:
+            needed.extend((x_col, yi))
+        if hue_in_cols: needed.append(cur_hue)
+        needed.extend(valid_hover)
+        if order_in_cols: needed.append(ds_order)
+
+        sorted_base_df = dataset.cols(list(dict.fromkeys(needed)))
+        if order_in_cols:
+            sorted_base_df = sorted_base_df.sort_values(by=ds_order)
+        else:
+            sorted_base_df = sorted_base_df.sort_index()
+
+        for idx_p, x_col, yi in resolved_pairs:
+            row = idx_p // ncols + 1
+            col = idx_p % ncols + 1
 
             req_cols = [x_col, yi]
             if hue_in_cols: req_cols.append(cur_hue)
             req_cols.extend(valid_hover)
-            if order_in_cols:
-                req_cols.append(ds_order)
 
-            req_cols = list(dict.fromkeys(req_cols))
+            df = sorted_base_df[list(dict.fromkeys(req_cols))]
 
-            df = sorted_base_df[req_cols]
+            # x/y are already serialized as the trace's own arrays, so only the
+            # hover parms ride in customdata (as a plain ndarray, not a frame) —
+            # shipping x/y there as well doubled the figure payload.
+            custom_data = df[valid_hover].to_numpy() if valid_hover else None
 
-            custom_data_cols = []
-            seen_cols = set()
-            for c in [x_col, yi] + valid_hover:
-                if c not in seen_cols:
-                    custom_data_cols.append(c)
-                    seen_cols.add(c)
-            
-            custom_data = df[custom_data_cols]
-            def get_cd_idx(col_name): return custom_data_cols.index(col_name)
-
-            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{customdata[{get_cd_idx(x_col)}]:.2f}}<br>{yi}: %{{customdata[{get_cd_idx(yi)}]:.2f}}"
-            for parm in valid_hover:
-                if pd.api.types.is_numeric_dtype(df[parm]): ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]:.5g}}"
-                else: ht += f"<br>{parm}: %{{customdata[{get_cd_idx(parm)}]}}"
+            ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{x:.2f}}<br>{yi}: %{{y:.2f}}"
+            for cd_i, parm in enumerate(valid_hover):
+                if pd.api.types.is_numeric_dtype(df[parm]): ht += f"<br>{parm}: %{{customdata[{cd_i}]:.5g}}"
+                else: ht += f"<br>{parm}: %{{customdata[{cd_i}]}}"
             ht += "<extra></extra>"
 
             mode_parts = []
@@ -928,7 +982,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
                 marker_dict['line'] = dict(width=fmt.get('edgewidth', 1), color=cur_color)
             line_dict['color'] = cur_color
 
-            fig.add_trace(go.Scatter(
+            fig.add_trace(_scatter_cls(len(df))(
                 x=df[x_col], y=df[yi], mode=mode,
                 name=f"{cur_idx}: {cur_title}",
                 legendgroup=f"group_{cur_idx}",
@@ -1029,23 +1083,23 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         row = (idx_ds // ncols) + 1
         col = (idx_ds % ncols) + 1
 
-        base_df = dataset.df
-        if x in base_df.columns:
+        base_cols = dataset.columns
+        if x in base_cols:
             x_col = x
         else:
-            cols_upper = {c.upper(): c for c in base_df.columns}
+            cols_upper = {c.upper(): c for c in base_cols}
             x_col = cols_upper.get(str(x).upper())
             if not x_col:
                 continue
 
-        valid_hover = [p for p in (display_parms or []) if p in base_df.columns]
+        valid_hover = [p for p in (display_parms or []) if p in base_cols]
         req_cols = list(dict.fromkeys(
-            [x_col] + [yi for yi in y_list if yi in base_df.columns]
+            [x_col] + [yi for yi in y_list if yi in base_cols]
             + valid_hover
             + ([dataset.order] if dataset.order and dataset.order != 'index'
-               and dataset.order in base_df.columns else [])
+               and dataset.order in base_cols else [])
         ))
-        df = base_df.loc[:, ~base_df.columns.duplicated()][req_cols]
+        df = dataset.cols(req_cols)
         if dataset.order == 'index':
             df = df.sort_index()
         elif dataset.order:
@@ -1055,20 +1109,21 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         if dataset.linestyle:
             line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
 
+        hover_cd = df[valid_hover].to_numpy() if valid_hover else None
+
         if primary_y in df.columns:
             color0 = color_cycle[0]
-            cd_cols = list(dict.fromkeys([x_col, primary_y] + valid_hover))
-            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}"
-                  f"<br>{primary_y}: %{{customdata[1]:.2f}}<extra></extra>")
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
+                  f"<br>{primary_y}: %{{y:.2f}}<extra></extra>")
             fig.add_trace(
-                go.Scatter(
+                _scatter_cls(len(df))(
                     x=df[x_col], y=df[primary_y],
                     mode='lines+markers' if dataset.linestyle else 'markers',
                     name=primary_y, legendgroup=primary_y,
                     showlegend=(idx_ds == 0),
                     marker=dict(color=color0, size=dataset.markersize or 6),
                     line=dict(color=color0, **line_dict),
-                    customdata=df[cd_cols], hovertemplate=ht,
+                    customdata=hover_cd, hovertemplate=ht,
                 ),
                 row=row, col=col,
                 secondary_y=False if use_secondary else None,
@@ -1088,11 +1143,10 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
             if yi not in df.columns:
                 continue
             color_k = color_cycle[(k + 1) % len(color_cycle)]
-            cd_cols = list(dict.fromkeys([x_col, yi] + valid_hover))
-            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{customdata[0]:.2f}}"
-                  f"<br>{yi}: %{{customdata[1]:.2f}}<extra></extra>")
+            ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
+                  f"<br>{yi}: %{{y:.2f}}<extra></extra>")
             fig.add_trace(
-                go.Scatter(
+                _scatter_cls(len(df))(
                     x=df[x_col], y=df[yi],
                     mode='lines+markers' if dataset.linestyle else 'markers',
                     name=yi, legendgroup=yi,
@@ -1103,7 +1157,7 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                         symbol='circle' if k == 0 else 'diamond',
                     ),
                     line=dict(color=color_k, **line_dict),
-                    customdata=df[cd_cols], hovertemplate=ht,
+                    customdata=hover_cd, hovertemplate=ht,
                 ),
                 row=row, col=col, secondary_y=True,
             )
@@ -1151,9 +1205,10 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df
+        df = ds.cols([c for c in dict.fromkeys([x] + y_list + markers_list)
+                      if c in ds.columns])
         offset_group = f"set_{ds.index}"
-        
+
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
             if yi not in df.columns: continue
@@ -1249,8 +1304,9 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df
-        
+        df = ds.cols([c for c in dict.fromkeys([x] + y_list + markers_list)
+                      if c in ds.columns])
+
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
             offset_group = f"var_{yi}"
@@ -1322,7 +1378,7 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df
+        df = ds.cols([c for c in dict.fromkeys([x] + y_list) if c in ds.columns])
 
         for idx_y, yi in enumerate(y_list):
             row, col = (idx_y // ncols) + 1, (idx_y % ncols) + 1
@@ -1370,11 +1426,11 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df
-        
+        df = ds.cols([c for c in dict.fromkeys([x] + y_list) if c in ds.columns])
+
         for idx_y, yi in enumerate(y_list):
             if yi not in df.columns: continue
-            
+
             fig.add_trace(go.Box(
                 x=df[x], 
                 y=df[yi],
@@ -1421,8 +1477,9 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 
     for ds in list_of_datasets:
         if not ds.select: continue
-        df = ds.df
-        
+        df = ds.cols([c for c in dict.fromkeys(x_list + ([y] if y else []))
+                      if c in ds.columns])
+
         use_color = color if color else ds.color
 
         for idx_x, xi in enumerate(x_list):
@@ -1496,8 +1553,9 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df
-        
+        df = ds.cols([c for c in dict.fromkeys(x_list + ([y] if y else []))
+                      if c in ds.columns])
+
         for idx_x, xi in enumerate(x_list):
             if xi not in df.columns: continue
             
@@ -1562,33 +1620,42 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
 
     edge_default = 'white' if darkmode else 'black'
 
+    # Fetch and style each overlay set once (the same trace repeats on every
+    # cell, so re-slicing the set per cell only multiplied the cost), then add
+    # traces cell-major to keep the original draw/legend order.
+    prepared = []
+    for ds in overlay_datasets:
+        ds_cols = ds.columns
+        if x not in ds_cols or y not in ds_cols:
+            continue
+
+        order_in_cols = ds.order and ds.order != 'index' and ds.order in ds_cols
+        df = ds.cols(list(dict.fromkeys([x, y] + ([ds.order] if order_in_cols else []))))
+
+        # Connect points in the set's own order so a hand-drawn boundary
+        # keeps its shape (an `order` column if set, else original rows).
+        if order_in_cols:
+            df = df.sort_values(by=ds.order)
+
+        # A linestyle means "draw a line" (trace a boundary); markers show
+        # unless the set is line-only.
+        want_lines = bool(ds.linestyle)
+        want_markers = bool(ds.marker) or not want_lines
+        mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers)
+
+        marker_dict = dict(
+            symbol=get_plotly_marker(ds.marker),
+            size=ds.markersize,
+            color=ds.color if ds.fill else 'rgba(0,0,0,0)',
+            line=dict(width=ds.edgewidth,
+                      color=ds.color if not ds.fill
+                      else (ds.edge_color or edge_default)),
+        )
+        prepared.append((ds, df, mode, marker_dict))
+
     for cell in range(n_subplots):
         row, col = (cell // ncols) + 1, (cell % ncols) + 1
-        for ds in overlay_datasets:
-            df = ds.df
-            if x not in df.columns or y not in df.columns:
-                continue
-
-            # Connect points in the set's own order so a hand-drawn boundary
-            # keeps its shape (an `order` column if set, else original rows).
-            if ds.order and ds.order != 'index' and ds.order in df.columns:
-                df = df.sort_values(by=ds.order)
-
-            # A linestyle means "draw a line" (trace a boundary); markers show
-            # unless the set is line-only.
-            want_lines = bool(ds.linestyle)
-            want_markers = bool(ds.marker) or not want_lines
-            mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers)
-
-            marker_dict = dict(
-                symbol=get_plotly_marker(ds.marker),
-                size=ds.markersize,
-                color=ds.color if ds.fill else 'rgba(0,0,0,0)',
-                line=dict(width=ds.edgewidth,
-                          color=ds.color if not ds.fill
-                          else (ds.edge_color or edge_default)),
-            )
-
+        for ds, df, mode, marker_dict in prepared:
             fig.add_trace(go.Scatter(
                 x=df[x], y=df[y],
                 mode=mode,
@@ -1633,8 +1700,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     ))
 
     for idx_ds, ds in enumerate(active_ds):
-        df = ds.df
-        if x not in df.columns or y not in df.columns: 
+        df = ds.cols([c for c in dict.fromkeys([x, y] + z_list) if c in ds.columns])
+        if x not in df.columns or y not in df.columns:
             continue
 
         for idx_z, zi in enumerate(z_list):
@@ -1730,8 +1797,8 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
     for idx_ds, ds in enumerate(active_ds):
         row, col = (idx_ds // ncols) + 1, (idx_ds % ncols) + 1
-        df = ds.df
-        
+        df = ds.cols([c for c in dict.fromkeys([x, y] + z_list) if c in ds.columns])
+
         if x not in df.columns or y not in df.columns: continue
 
         for idx_z, zi in enumerate(z_list):
@@ -1823,8 +1890,8 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
 
         y_data = []
         for ds in active_ds:
-            if yi in ds.df.columns:
-                valid_data = ds.df[yi].dropna()
+            if yi in ds.columns:
+                valid_data = ds[yi].dropna()
                 if valid_data.empty:
                     val = None
                 elif agg == 'mean': val = valid_data.mean()
@@ -1919,8 +1986,8 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
         all_x_labels = []
 
         for ds in active_ds:
-            if yi in ds.df.columns:
-                valid_data = ds.df[yi].dropna()
+            if yi in ds.columns:
+                valid_data = ds[yi].dropna()
                 if not valid_data.empty:
                     all_y_data.extend(valid_data.values)
                     label = f"{ds.index}: {ds.title}"
@@ -2040,19 +2107,22 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     fig = go.Figure()
 
     for ds in active:
-        base_df = ds.df
-        base_cols = base_df.columns
+        base_cols = ds.columns
         if x not in base_cols:
             continue
 
         ds_hover = display_parms if display_parms is not None else getattr(ds, 'display_parms', [])
         valid_hover = [p for p in (ds_hover or []) if p in base_cols]
 
-        sorted_base_df = base_df.loc[:, ~base_cols.duplicated()]
+        # Fetch only the columns this plot touches, then sort the narrow
+        # frame — sorting the full set width dominated on wide frames.
         order_col = getattr(ds, 'order', None)
-        if order_col == 'index':
-            sorted_base_df = sorted_base_df.sort_index()
-        elif order_col and order_col in sorted_base_df.columns:
+        order_in_cols = bool(order_col) and order_col != 'index' and order_col in base_cols
+        needed = [x] + [yi for yi in y_list if yi in base_cols] + valid_hover
+        if order_in_cols:
+            needed.append(order_col)
+        sorted_base_df = ds.cols(list(dict.fromkeys(needed)))
+        if order_in_cols:
             sorted_base_df = sorted_base_df.sort_values(by=order_col)
         else:
             sorted_base_df = sorted_base_df.sort_index()
@@ -2079,7 +2149,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                   f"{yi}: %{{y:.4g}}")
             customdata = None
             if valid_hover:
-                customdata = df[valid_hover]
+                customdata = df[valid_hover].to_numpy()
                 for i, p in enumerate(valid_hover):
                     if pd.api.types.is_numeric_dtype(df[p]):
                         ht += f"<br>{p}: %{{customdata[{i}]:.4g}}"
@@ -2101,7 +2171,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
                     line=dict(width=fmt['edgewidth'], color=fmt['color']),
                 )
 
-            fig.add_trace(go.Scatter(
+            fig.add_trace(_scatter_cls(len(df))(
                 x=df[x], y=df[yi],
                 mode=mode,
                 name=f"{ds.index}: {ds.title}" if legend_group_by == 'vars' else yi,
@@ -2171,8 +2241,10 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
 class UnichartNotebook:
     def __init__(self):
         self.sets = []
-        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='Int64')})
+        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='int64')})
         self._next_set_id = 0
+        # Per-set row-position cache for the combined frame; see _set_positions.
+        self._set_row_pos = {}
 
         # State Memory
         self.last_x = None
@@ -2242,23 +2314,53 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Data Management
     # ------------------------------------------------------------------
+    def _set_positions(self, set_id):
+        """Cached integer row positions of a set within the combined frame.
+
+        Valid because row identity only changes through _register_sets /
+        _replace_set_rows / clear_data, which all reset the cache; column
+        writes leave row positions untouched.
+        """
+        pos = self._set_row_pos.get(set_id)
+        if pos is None:
+            ids = self._combined_df[_SET_ID_COL].to_numpy()
+            pos = np.flatnonzero(ids == set_id)
+            self._set_row_pos[set_id] = pos
+        return pos
+
     def _register_set(self, df, title):
         """Append a new set to the combined frame and create the façade Dataset.
 
         Outer-concats so missing columns are NaN-filled in either direction.
         Returns the new Dataset.
         """
-        if _SET_ID_COL in df.columns:
-            df = df.drop(columns=_SET_ID_COL)
+        return self._register_sets([(df, title)])[0]
 
-        set_id = self._next_set_id
-        self._next_set_id += 1
+    def _register_sets(self, frames_and_titles):
+        """Append several new sets with a single combined-frame rebuild.
 
-        tagged = df.copy()
-        tagged[_SET_ID_COL] = set_id
+        Each (df, title) pair becomes one Dataset. Concatenating once keeps a
+        multi-set load O(total rows); registering one set at a time re-copies
+        the whole accumulated frame per set.
+        """
+        if not frames_and_titles:
+            return []
 
-        if self._combined_df.empty:
-            self._combined_df = tagged.reset_index(drop=True)
+        tagged_frames, metas = [], []
+        for df, title in frames_and_titles:
+            if _SET_ID_COL in df.columns:
+                df = df.drop(columns=_SET_ID_COL)
+            set_id = self._next_set_id
+            self._next_set_id += 1
+            tagged = df.copy()
+            tagged[_SET_ID_COL] = set_id
+            tagged_frames.append(tagged)
+            metas.append((set_id, title))
+
+        frames = (tagged_frames if self._combined_df.empty
+                  else [self._combined_df, *tagged_frames])
+        if len(frames) == 1:
+            self._combined_df = frames[0].reset_index(drop=True)
         else:
             # Row-stacking sets that introduce disjoint columns leaves the result
             # with one block per column (a 122-col frame ends up 122 blocks). The
@@ -2268,14 +2370,17 @@ class UnichartNotebook:
             # trailing .copy() is a deliberate defragmentation — it consolidates the
             # blocks; do not remove it as a redundant copy.
             self._combined_df = pd.concat(
-                [self._combined_df, tagged], ignore_index=True, sort=False
+                frames, ignore_index=True, sort=False
             ).copy()
+        self._set_row_pos = {}
 
-        next_index = len(self.sets)
-        ds = Dataset(self, set_id, index=next_index, title=title)
-        self.sets.append(ds)
+        created = []
+        for set_id, title in metas:
+            ds = Dataset(self, set_id, index=len(self.sets), title=title)
+            self.sets.append(ds)
+            created.append(ds)
         self._reapply_all_queries()
-        return ds
+        return created
 
     def _reapply_all_queries(self):
         """Recompute every dataset's query mask. Call after combined-frame mutations."""
@@ -2298,6 +2403,7 @@ class UnichartNotebook:
             # next per-column write warns about fragmentation.
             self._combined_df = pd.concat(
                 [kept, tagged], ignore_index=True, sort=False).copy()
+        self._set_row_pos = {}
         # ignore_index rebuilds every row label, which staled all query masks
         # (they are keyed to the global index). Recompute them all.
         self._reapply_all_queries()
@@ -2338,6 +2444,9 @@ class UnichartNotebook:
                 df["SETNUMBER"] = df.index
 
         if set_idx_column and set_idx_column in df.columns:
+            # Collect every group first and register them in one batch — one
+            # combined-frame rebuild for the whole file instead of one per set.
+            groups = []
             for set_index, df_subset in df.groupby(set_idx_column):
                 if title:
                     final_title = title
@@ -2347,19 +2456,22 @@ class UnichartNotebook:
                     final_title = str(df_subset.iloc[0]["TITLE"])
                 else:
                     final_title = f"Group {set_index}"
+                groups.append((df_subset, final_title))
 
-                ds = self._register_set(df_subset, final_title)
+            for ds in self._register_sets(groups):
                 print(f"Loaded Set {ds.index}: {ds.title}")
         else:
             ds = self._register_set(df, title if title else "Untitled")
             print(f"Loaded Set {ds.index}: {ds.title}")
 
         if load_cols_as_vars:
-            for column in df.columns:
-                try:
-                    exec(f"{column} = '{column}'", globals())
-                except Exception as e:
-                    print(f"Could not create variable for column '{column}': {e}")
+            names = {str(c): str(c) for c in df.columns if str(c).isidentifier()}
+            globals().update(names)
+            skipped = [c for c in df.columns if str(c) not in names]
+            if skipped:
+                print(f"Could not create variables for {len(skipped)} column(s) "
+                      f"whose names are not valid identifiers: {skipped[:10]}"
+                      f"{'...' if len(skipped) > 10 else ''}")
 
     _FILE_READERS = {
         ".csv": lambda path, kw: pd.read_csv(path, **kw),
@@ -2437,8 +2549,9 @@ class UnichartNotebook:
 
     def clear_data(self):
         self.sets = []
-        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='Int64')})
+        self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='int64')})
         self._next_set_id = 0
+        self._set_row_pos = {}
         print("All datasets cleared.")
 
     # ------------------------------------------------------------------
@@ -3019,9 +3132,9 @@ class UnichartNotebook:
             formula = label if kind not in ('poly', 'log', 'exp', 'power') else None
             if kind is None or x_col is None or y_col is None:
                 return formula, None
-            df = ds.df
-            if x_col not in df.columns or y_col not in df.columns:
+            if x_col not in ds.columns or y_col not in ds.columns:
                 return formula, None
+            df = ds.cols([x_col, y_col])
             try:
                 df_c = df.dropna(subset=[x_col, y_col]).sort_values(by=x_col)
                 x = df_c[x_col].to_numpy(dtype=float)
@@ -3300,9 +3413,9 @@ class UnichartNotebook:
             raise IndexError(f"base_idx {base_idx} is out of range (have {len(self.sets)} datasets).")
 
         base_ds = self.sets[base_idx]
-        if align_on not in base_ds.df.columns:
+        if align_on not in base_ds.columns:
             raise ValueError(f"align_on column '{align_on}' not found in base dataset '{base_ds.title}'.")
-        if x_ins is not None and not pd.api.types.is_numeric_dtype(base_ds.df[align_on]):
+        if x_ins is not None and not pd.api.types.is_numeric_dtype(base_ds[align_on]):
             raise ValueError(
                 f"x_ins interpolation requires a numeric align_on; '{align_on}' is "
                 f"not numeric in base dataset '{base_ds.title}'.")
@@ -3355,23 +3468,25 @@ class UnichartNotebook:
         # set. (The phantom-column drop further down does, via valid_parms, so
         # it stays inside the per-study loop.)
         base_raw = base_ds.df
-        base_sorted = (base_raw.loc[:, ~base_raw.columns.duplicated()]
-                       .sort_values(align_on).reset_index(drop=True))
+        if base_raw.columns.duplicated().any():
+            base_raw = base_raw.loc[:, ~base_raw.columns.duplicated()]
+        base_sorted = base_raw.sort_values(align_on).reset_index(drop=True)
         base_all_nan = base_sorted.isna().all()
 
         created = []
 
         for study_ds in targets:
-            if align_on not in study_ds.df.columns:
+            study_cols = study_ds.columns
+            if align_on not in study_cols:
                 print(f"Warning: skipping '{study_ds.title}' — align_on column '{align_on}' not found.")
                 continue
-            if x_ins is not None and not pd.api.types.is_numeric_dtype(study_ds.df[align_on]):
+            if x_ins is not None and not pd.api.types.is_numeric_dtype(study_ds[align_on]):
                 print(f"Warning: skipping '{study_ds.title}' — x_ins interpolation needs a "
                       f"numeric align_on, but '{align_on}' is not numeric there.")
                 continue
 
             valid_parms = [p for p in delta_parms
-                           if p in base_sorted.columns and p in study_ds.df.columns]
+                           if p in base_sorted.columns and p in study_cols]
             skipped = sorted(set(delta_parms) - set(valid_parms))
             if skipped:
                 print(f"Warning: skipping columns not present in both datasets: {skipped}")
@@ -3388,9 +3503,9 @@ class UnichartNotebook:
                       f"{sorted(set(keep_dropped))}")
 
             passed_valid = [c for c in passed_parms
-                            if c != align_on and c in study_ds.df.columns]
+                            if c != align_on and c in study_cols]
             passed_missing = [c for c in passed_parms
-                              if c != align_on and c not in study_ds.df.columns]
+                              if c != align_on and c not in study_cols]
             if passed_missing:
                 print(f"Warning: passed_parms not in study '{study_ds.title}' (ignored): {passed_missing}")
 
@@ -3406,9 +3521,11 @@ class UnichartNotebook:
                 df_base = df_base.drop(columns=phantom)
 
             # --- Study side: align_on + (delta parms ∪ passthroughs), renamed *_STUDY. ---
-            study_df = study_ds.df.loc[:, ~study_ds.df.columns.duplicated()]
+            # ds.cols keeps the first occurrence of any duplicated label and only
+            # copies the named columns, never the study set's full width.
             study_need = list(dict.fromkeys([align_on] + valid_parms + passed_valid))
-            df_study = study_df[study_need].sort_values(align_on).reset_index(drop=True)
+            df_study = (study_ds.cols(study_need)
+                        .sort_values(align_on).reset_index(drop=True))
             df_study = df_study.rename(
                 columns={c: f"{c}_STUDY" for c in df_study.columns if c != align_on})
 
@@ -3569,7 +3686,7 @@ class UnichartNotebook:
             print(f"Warning: combine_sets requires at least 2 datasets (got {len(sources)}).")
             return None
 
-        col_sets = [set(ds.df.columns) for ds in sources]
+        col_sets = [set(ds.columns) for ds in sources]
         shared = col_sets[0].intersection(*col_sets[1:])
         all_cols = set().union(*col_sets)
         only_in_some = all_cols - shared
@@ -4325,7 +4442,7 @@ class UnichartNotebook:
         for ds in self._get_uset_slice(uset_slice):
             ds_kind = kind if kind is not None else (ds.reg_order or 'linear')
             results[ds.index] = table_read(
-                ds.df, x_col, y_col, x_in,
+                ds.cols([x_col, y_col]), x_col, y_col, x_in,
                 kind=ds_kind, fill_value=fill_value, bounds_error=bounds_error,
             )
         return results
@@ -4342,8 +4459,8 @@ class UnichartNotebook:
         sets selected the statistic is computed over their combined values.
         Returns a scalar, or ``None`` (with a message) when no data is found.
         """
-        parts = [ds.df[column] for ds in self._get_uset_slice(uset_slice)
-                 if column in ds.df.columns]
+        parts = [ds[column] for ds in self._get_uset_slice(uset_slice)
+                 if column in ds.columns]
         if not parts:
             print(f"{name}: column {column!r} not found in the selected dataset(s).")
             return None
@@ -4494,12 +4611,13 @@ class UnichartNotebook:
                 if not ds.select:
                     continue
 
-                df = ds.df
-                if xc not in df.columns:
+                ds_cols = ds.columns
+                if xc not in ds_cols:
                     continue
-                valid_ycols = [c for c in y_cols if c in df.columns]
+                valid_ycols = [c for c in y_cols if c in ds_cols]
                 if not valid_ycols:
                     continue
+                df = ds.cols([xc] + valid_ycols)
 
                 spec = kind if kind is not None else ds.reg_order
                 existing = df[xc].to_numpy(dtype=float)
@@ -4591,12 +4709,12 @@ class UnichartNotebook:
                 if not ds.select:
                     continue
 
-                valid_cols = [c for c in target_cols if c in ds.df.columns]
+                valid_cols = [c for c in target_cols if c in ds.columns]
 
                 if not valid_cols:
                     continue
 
-                subset = ds.df[valid_cols].copy()           # <-- copy to avoid mutating the dataset
+                subset = ds.cols(valid_cols)        # fresh narrow copy — safe to mutate
                 subset.insert(0, 'Dataset', ds.title)
                 subset.insert(0, 'Set', ds.index)
                 combined_dfs.append(subset)
@@ -4770,10 +4888,12 @@ class UnichartNotebook:
             print("No datasets loaded.")
             return
 
+        n_data_cols = len(_data_col_indexer(self._combined_df))
         rows = []
         for ds in self.sets:
             selected = "✓" if ds.select else "X"
-            shape = f"{ds.df.shape[0]} x {ds.df.shape[1]}"
+            # Shape from the cached row positions — no full-width materialization.
+            shape = f"{len(ds._masked_positions())} x {n_data_cols}"
             query_info = str(ds.query)
             rows.append([
                 f"Set {ds.index}",
@@ -4882,10 +5002,11 @@ class UnichartNotebook:
         records = []
         for ds in active_ds:
             query_disp = str(ds.query) if ds.query else "-"
+            ds_cols = ds.columns
 
             for col in target_cols:
-                if col in ds.df.columns:
-                    data = ds.df[col].dropna()
+                if col in ds_cols:
+                    data = ds[col].dropna()
 
                     if data.empty:
                         records.append({

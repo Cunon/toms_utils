@@ -18,7 +18,10 @@
       "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/repro3.py)",
       "Read(//home/tom/.claude/jobs/fa5372b8/tmp/**)",
       "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py save baseline.pkl)",
-      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py check baseline.pkl)"
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py check baseline.pkl)",
+      "Bash(command -v git)",
+      "Bash(git -C /home/tom/Documents/GitHub/toms_utils show HEAD:unichart.py)",
+      "Read(//tmp/**)"
     ]
   }
 }
