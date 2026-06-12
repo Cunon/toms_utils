@@ -234,6 +234,9 @@ class _DatasetFrameView:
     back into the combined frame, NaN-filling other sets when a new column is
     introduced. Exists so that legacy `ds._df_full[col] = values` patterns
     continue to work after the storage refactor.
+
+    Unlike ``Dataset.df``, reads here are ownership-agnostic: the slice spans
+    every combined-frame column, including other sets' all-NaN phantoms.
     """
 
     def __init__(self, dataset):
@@ -298,6 +301,9 @@ class _DatasetFrameView:
             cdf[key] = cdf[key].astype(object)
 
         cdf.loc[mask, key] = assign_val
+        # Writing through the view claims the column for this set — including
+        # the case of filling NaNs into a column another set introduced.
+        self._dataset._own_cols.add(key)
         notebook._reapply_all_queries()
 
     @property
@@ -330,7 +336,8 @@ class Dataset:
     `notebook._combined_df`, keyed by the `_SET_ID` column.
     """
 
-    def __init__(self, notebook, set_id, index=0, title=None, display_parms=None):
+    def __init__(self, notebook, set_id, index=0, title=None, display_parms=None,
+                 own_cols=None):
         if not hasattr(notebook, '_combined_df'):
             raise TypeError(
                 "Dataset must be constructed by a UnichartNotebook; "
@@ -340,6 +347,14 @@ class Dataset:
         self._query = None
         self._query_mask = None
         self._select = True
+
+        # Columns this set actually owns. Other sets' columns exist in the
+        # combined frame as all-NaN phantoms for this set; ownership keeps
+        # them out of `df`/`columns`. None (legacy construction) means
+        # "everything currently in the combined frame".
+        if own_cols is None:
+            own_cols = set(notebook._combined_df.columns)
+        self._own_cols = {c for c in own_cols if c != _SET_ID_COL}
 
         if title:
             self.title = title
@@ -394,17 +409,34 @@ class Dataset:
             pos = pos[qm[pos]]
         return pos
 
+    def _own_col_positions(self):
+        """Integer positions of this set's own columns within the combined
+        frame (reconciling ownership with any untracked column changes first)."""
+        self._notebook._reconcile_columns()
+        own = self._own_cols
+        cols = self._notebook._combined_df.columns
+        return [i for i, c in enumerate(cols) if c != _SET_ID_COL and c in own]
+
     @property
     def columns(self):
-        """Column labels visible to this set (the combined frame's columns,
-        minus _SET_ID) — without materializing any rows."""
-        return self._notebook._combined_df.columns.drop(_SET_ID_COL, errors='ignore')
+        """Column labels this set actually owns, in combined-frame order —
+        without materializing any rows. All-NaN phantom columns introduced by
+        *other* sets sharing the combined frame are excluded. Ownership is
+        kept current by the write APIs and by automatic reconciliation of
+        columns added/removed directly on ``nb.df``; after in-place value
+        surgery on the live frame, call ``nb.refresh_own_columns(rescan=True)``.
+        """
+        cols = self._notebook._combined_df.columns
+        return pd.Index([cols[i] for i in self._own_col_positions()])
 
     def cols(self, keys, masked=True):
         """Rows of just the requested column(s) — far cheaper than ``self.df[keys]``
         on wide frames, since only the named columns are copied. Missing keys are
         silently skipped; duplicated column labels keep their first occurrence
         (matching the plotters' dedup behavior). Returns a fresh copy.
+
+        Explicitly requested keys are served from the combined frame whether or
+        not this set owns them (a phantom column comes back all-NaN).
         """
         cdf = self._notebook._combined_df
         if not isinstance(keys, (list, tuple)):
@@ -450,13 +482,15 @@ class Dataset:
 
     @property
     def df(self):
-        """Read-only view of this set's rows (query mask applied).
+        """Read-only view of this set's rows (query mask applied), restricted
+        to the columns this set owns — all-NaN phantom columns introduced by
+        other sets are excluded (see :attr:`columns`).
 
         Returns a fresh copy each call, so assigning to it does NOT persist:
         use ``ds['col'] = ...`` (or ``nb.set_column``) to write back.
         """
         cdf = self._notebook._combined_df
-        return cdf.iloc[self._masked_positions(), _data_col_indexer(cdf)]
+        return cdf.iloc[self._masked_positions(), self._own_col_positions()]
 
     @df.setter
     def df(self, value):
@@ -2245,6 +2279,9 @@ class UnichartNotebook:
         self._next_set_id = 0
         # Per-set row-position cache for the combined frame; see _set_positions.
         self._set_row_pos = {}
+        # Column-ownership reconciliation state; see _reconcile_columns.
+        self._cols_snapshot = self._combined_df.columns
+        self._known_cols = set(self._combined_df.columns)
 
         # State Memory
         self.last_x = None
@@ -2328,6 +2365,74 @@ class UnichartNotebook:
             self._set_row_pos[set_id] = pos
         return pos
 
+    def _reconcile_columns(self):
+        """Sync per-set column ownership with the combined frame's columns.
+
+        Cheap fast path: pandas replaces the columns Index object whenever a
+        column is added, removed, or renamed, so an identity check catches any
+        untracked column-set change (e.g. a direct ``nb.df['NEW'] = ...``).
+        Brand-new columns are claimed by the sets that actually hold data in
+        them; removed columns are forgotten everywhere. The one thing this
+        cannot see is an in-place *value* write into an existing column
+        (``nb.df.loc[...] = ...``) — the API write paths track those
+        themselves, and ``refresh_own_columns(rescan=True)`` heals after
+        direct surgery.
+        """
+        cdf = self._combined_df
+        if cdf.columns is self._cols_snapshot:
+            return
+        current = set(cdf.columns)
+        added = current - self._known_cols
+        removed = self._known_cols - current
+        added.discard(_SET_ID_COL)
+        if removed:
+            for ds in self.sets:
+                ds._own_cols -= removed
+        for col in added:
+            col_vals = cdf[col]
+            if isinstance(col_vals, pd.DataFrame):   # duplicated label
+                notna = col_vals.notna().any(axis=1).to_numpy()
+            else:
+                notna = col_vals.notna().to_numpy()
+            for ds in self.sets:
+                if notna[self._set_positions(ds._set_id)].any():
+                    ds._own_cols.add(col)
+        self._cols_snapshot = cdf.columns
+        self._known_cols = current
+
+    def _snapshot_columns(self):
+        """Mark the combined frame's current columns as reconciled."""
+        self._cols_snapshot = self._combined_df.columns
+        self._known_cols = set(self._combined_df.columns)
+
+    def refresh_own_columns(self, rescan=False):
+        """Re-sync per-set column ownership with the combined frame.
+
+        Ownership normally maintains itself: loading, ``ds['col'] = ...``,
+        ``add_column``, ``set_column`` and df replacement all track it, and
+        columns added/removed/renamed directly on ``nb.df`` are reconciled
+        automatically from the data. The one blind spot is filling values
+        *in place* into existing columns of the live frame (e.g.
+        ``nb.df.loc[rows, 'COL'] = ...``) for a set that didn't own that
+        column. Call with ``rescan=True`` after that kind of surgery: every
+        column holding any data in a set's rows is claimed by that set.
+        Rescan only ever adds ownership, it never revokes it.
+        """
+        self._reconcile_columns()
+        if not rescan:
+            return
+        cdf = self._combined_df
+        all_cols = list(cdf.columns)
+        for ds in self.sets:
+            pos = self._set_positions(ds._set_id)
+            missing_pos = [i for i, c in enumerate(all_cols)
+                           if c != _SET_ID_COL and c not in ds._own_cols]
+            if not len(pos) or not missing_pos:
+                continue
+            sub = cdf.iloc[pos, missing_pos]
+            has_data = sub.notna().any().to_numpy()
+            ds._own_cols.update(np.asarray(sub.columns)[has_data].tolist())
+
     def _register_set(self, df, title):
         """Append a new set to the combined frame and create the façade Dataset.
 
@@ -2346,6 +2451,10 @@ class UnichartNotebook:
         if not frames_and_titles:
             return []
 
+        # Settle any untracked column changes against the *current* frame
+        # before the rebuild makes them indistinguishable from the new sets'.
+        self._reconcile_columns()
+
         tagged_frames, metas = [], []
         for df, title in frames_and_titles:
             if _SET_ID_COL in df.columns:
@@ -2355,7 +2464,7 @@ class UnichartNotebook:
             tagged = df.copy()
             tagged[_SET_ID_COL] = set_id
             tagged_frames.append(tagged)
-            metas.append((set_id, title))
+            metas.append((set_id, title, set(df.columns)))
 
         frames = (tagged_frames if self._combined_df.empty
                   else [self._combined_df, *tagged_frames])
@@ -2373,10 +2482,12 @@ class UnichartNotebook:
                 frames, ignore_index=True, sort=False
             ).copy()
         self._set_row_pos = {}
+        self._snapshot_columns()
 
         created = []
-        for set_id, title in metas:
-            ds = Dataset(self, set_id, index=len(self.sets), title=title)
+        for set_id, title, own_cols in metas:
+            ds = Dataset(self, set_id, index=len(self.sets), title=title,
+                         own_cols=own_cols)
             self.sets.append(ds)
             created.append(ds)
         self._reapply_all_queries()
@@ -2389,6 +2500,7 @@ class UnichartNotebook:
 
     def _replace_set_rows(self, set_id, new_df):
         """Replace all rows belonging to set_id with new_df (re-tagged with the same id)."""
+        self._reconcile_columns()
         cdf = self._combined_df
         kept = cdf.loc[cdf[_SET_ID_COL] != set_id]
         if _SET_ID_COL in new_df.columns:
@@ -2404,6 +2516,12 @@ class UnichartNotebook:
             self._combined_df = pd.concat(
                 [kept, tagged], ignore_index=True, sort=False).copy()
         self._set_row_pos = {}
+        # The replacement frame defines this set's columns from scratch.
+        for ds in self.sets:
+            if ds._set_id == set_id:
+                ds._own_cols = set(new_df.columns) - {_SET_ID_COL}
+                break
+        self._snapshot_columns()
         # ignore_index rebuilds every row label, which staled all query masks
         # (they are keyed to the global index). Recompute them all.
         self._reapply_all_queries()
@@ -2552,6 +2670,7 @@ class UnichartNotebook:
         self._combined_df = pd.DataFrame({_SET_ID_COL: pd.Series(dtype='int64')})
         self._next_set_id = 0
         self._set_row_pos = {}
+        self._snapshot_columns()
         print("All datasets cleared.")
 
     # ------------------------------------------------------------------
@@ -2562,7 +2681,11 @@ class UnichartNotebook:
         """The combined DataFrame across all sets (with the _SET_ID column visible).
 
         Returned live — mutations affect plotting. Prefer `add_column` /
-        `set_column` for safe writes; they reapply per-set query masks.
+        `set_column` for safe writes; they reapply per-set query masks and
+        track per-set column ownership. Adding or dropping columns directly
+        here is detected and reconciled automatically (ownership is assigned
+        from the data); filling values *in place* into existing columns is
+        not — call `refresh_own_columns(rescan=True)` afterwards.
         """
         return self._combined_df
 
@@ -2574,7 +2697,13 @@ class UnichartNotebook:
         """
         if callable(value):
             value = value(self._combined_df)
+        self._reconcile_columns()
         self._combined_df[name] = value
+        # An all-sets write: every set owns the column, even where the
+        # assigned values happen to be NaN.
+        for ds in self.sets:
+            ds._own_cols.add(name)
+        self._snapshot_columns()
         self._reapply_all_queries()
 
     def set_column(self, uset_slice, col, value):
@@ -2599,6 +2728,10 @@ class UnichartNotebook:
             cdf.loc[mask, col] = list(value)
         else:
             cdf.loc[mask, col] = value
+        # The targeted sets claim the column — including the case of filling
+        # NaNs into a column some other set introduced.
+        for ds in targets:
+            ds._own_cols.add(col)
         self._reapply_all_queries()
 
     def set_color_palette(self, palette, uset_slice='all'):
@@ -3465,8 +3598,10 @@ class UnichartNotebook:
         # --- Base side: every base column, anchored and sorted on align_on. ---
         # Prepared once: base_ds.df materializes a fresh slice of the combined
         # frame on every access, and the dedup/sort don't depend on the study
-        # set. (The phantom-column drop further down does, via valid_parms, so
-        # it stays inside the per-study loop.)
+        # set. Ownership already excludes other sets' all-NaN phantom columns
+        # from the view, so the NaN scan below only spans the base set's own
+        # width (it exists to drop genuinely empty own columns; the per-study
+        # drop stays in the loop because it depends on valid_parms).
         base_raw = base_ds.df
         if base_raw.columns.duplicated().any():
             base_raw = base_raw.loc[:, ~base_raw.columns.duplicated()]
@@ -3509,11 +3644,11 @@ class UnichartNotebook:
             if passed_missing:
                 print(f"Warning: passed_parms not in study '{study_ds.title}' (ignored): {passed_missing}")
 
-            # All sets share one combined frame, so this set's view carries an
-            # all-NaN column for every column introduced by *other* sets (e.g. the
-            # DL_/DLPCT_/METHOD outputs of a previous delta). Drop those phantom
-            # columns so they are not carried into the result as empty context —
-            # but never drop the align key or an actual delta parameter.
+            # Ownership keeps other sets' phantom columns (e.g. the DL_/DLPCT_/
+            # METHOD outputs of a previous delta) out of the base view; this
+            # drop removes the base set's own genuinely all-NaN columns so they
+            # are not carried into the result as empty context — but never the
+            # align key or an actual delta parameter.
             df_base = base_sorted
             phantom = [c for c in df_base.columns
                        if c != align_on and c not in valid_parms and base_all_nan[c]]
@@ -4888,12 +5023,12 @@ class UnichartNotebook:
             print("No datasets loaded.")
             return
 
-        n_data_cols = len(_data_col_indexer(self._combined_df))
         rows = []
         for ds in self.sets:
             selected = "✓" if ds.select else "X"
-            # Shape from the cached row positions — no full-width materialization.
-            shape = f"{len(ds._masked_positions())} x {n_data_cols}"
+            # Shape from cached row positions and own-column count — no
+            # full-width materialization.
+            shape = f"{len(ds._masked_positions())} x {len(ds._own_col_positions())}"
             query_info = str(ds.query)
             rows.append([
                 f"Set {ds.index}",
