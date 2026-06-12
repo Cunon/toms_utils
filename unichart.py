@@ -2260,9 +2260,16 @@ class UnichartNotebook:
         if self._combined_df.empty:
             self._combined_df = tagged.reset_index(drop=True)
         else:
+            # Row-stacking sets that introduce disjoint columns leaves the result
+            # with one block per column (a 122-col frame ends up 122 blocks). The
+            # concat itself is silent, but the fragmented frame is slow for column
+            # access and trips a "DataFrame is highly fragmented" PerformanceWarning
+            # on the next per-column write (e.g. ds['x']=..., set_column). The
+            # trailing .copy() is a deliberate defragmentation — it consolidates the
+            # blocks; do not remove it as a redundant copy.
             self._combined_df = pd.concat(
                 [self._combined_df, tagged], ignore_index=True, sort=False
-            )
+            ).copy()
 
         next_index = len(self.sets)
         ds = Dataset(self, set_id, index=next_index, title=title)
@@ -2286,7 +2293,11 @@ class UnichartNotebook:
         if kept.empty:
             self._combined_df = tagged.reset_index(drop=True)
         else:
-            self._combined_df = pd.concat([kept, tagged], ignore_index=True, sort=False)
+            # Trailing .copy() consolidates the row-stacked blocks; see the note in
+            # _register_set. Without it the frame stays one-block-per-column and the
+            # next per-column write warns about fragmentation.
+            self._combined_df = pd.concat(
+                [kept, tagged], ignore_index=True, sort=False).copy()
         # ignore_index rebuilds every row label, which staled all query masks
         # (they are keyed to the global index). Recompute them all.
         self._reapply_all_queries()
@@ -3296,14 +3307,22 @@ class UnichartNotebook:
                 f"x_ins interpolation requires a numeric align_on; '{align_on}' is "
                 f"not numeric in base dataset '{base_ds.title}'.")
 
-        def _read_col_at(src_df, xcol, ycol, x_arr, do_interp, spec):
+        def _nearest_key(src_df, xcol):
+            """Sort permutation and sorted x for ``xcol`` — computed once per side
+            and shared by every `_read_col_at` nearest lookup on that side."""
+            x = src_df[xcol].to_numpy(dtype=float)
+            order = np.argsort(x)
+            return order, x[order]
+
+        def _read_col_at(src_df, xcol, ycol, x_arr, do_interp, spec, order, x_sorted):
             """Read ``ycol`` from ``src_df`` at the ``x_arr`` positions of ``xcol``.
 
             Numeric columns on an interpolated side are read off the regression
             curve (``spec``) when one fits, else by 1-D linear interpolation
             through the raw points. Non-numeric columns, and any column on a
             non-interpolated side, carry the value from the row whose ``xcol`` is
-            nearest each requested point. Returns ``(values, method_label)``.
+            nearest each requested point (``order``/``x_sorted`` from
+            ``_nearest_key``). Returns ``(values, method_label)``.
             """
             col = src_df[ycol]
             if do_interp and pd.api.types.is_numeric_dtype(col):
@@ -3312,11 +3331,16 @@ class UnichartNotebook:
                 if rx is not None:
                     return np.interp(x_arr, rx, ry), fit_label
                 return table_read(src_df, xcol, ycol, x_arr, kind='linear'), 'Table'
-            existing = src_df[xcol].to_numpy(dtype=float)
-            order = np.argsort(existing)
-            x_sorted = existing[order]
             y_sorted = col.to_numpy()[order]
-            nearest = np.abs(x_sorted[:, None] - x_arr[None, :]).argmin(axis=0)
+            if len(x_sorted) == 1:
+                nearest = np.zeros(len(x_arr), dtype=np.intp)
+            else:
+                idx = np.clip(np.searchsorted(x_sorted, x_arr), 1, len(x_sorted) - 1)
+                left, right = x_sorted[idx - 1], x_sorted[idx]
+                nearest = np.where(x_arr - left <= right - x_arr, idx - 1, idx)
+                # Among duplicate x values take the first occurrence, matching the
+                # full argmin scan this replaces.
+                nearest = np.searchsorted(x_sorted, x_sorted[nearest], side='left')
             return y_sorted[nearest], 'Nearest'
 
         # Exclude the base from study targets to avoid a trivial zero-delta set
@@ -3324,6 +3348,16 @@ class UnichartNotebook:
         if not targets:
             print("No study datasets to process (base dataset excluded if present in selection).")
             return []
+
+        # --- Base side: every base column, anchored and sorted on align_on. ---
+        # Prepared once: base_ds.df materializes a fresh slice of the combined
+        # frame on every access, and the dedup/sort don't depend on the study
+        # set. (The phantom-column drop further down does, via valid_parms, so
+        # it stays inside the per-study loop.)
+        base_raw = base_ds.df
+        base_sorted = (base_raw.loc[:, ~base_raw.columns.duplicated()]
+                       .sort_values(align_on).reset_index(drop=True))
+        base_all_nan = base_sorted.isna().all()
 
         created = []
 
@@ -3337,7 +3371,7 @@ class UnichartNotebook:
                 continue
 
             valid_parms = [p for p in delta_parms
-                           if p in base_ds.df.columns and p in study_ds.df.columns]
+                           if p in base_sorted.columns and p in study_ds.df.columns]
             skipped = sorted(set(delta_parms) - set(valid_parms))
             if skipped:
                 print(f"Warning: skipping columns not present in both datasets: {skipped}")
@@ -3360,17 +3394,14 @@ class UnichartNotebook:
             if passed_missing:
                 print(f"Warning: passed_parms not in study '{study_ds.title}' (ignored): {passed_missing}")
 
-            # --- Base side: every base column, anchored and sorted on align_on. ---
-            base_df = base_ds.df.loc[:, ~base_ds.df.columns.duplicated()]
-            df_base = base_df.sort_values(align_on).reset_index(drop=True)
-
             # All sets share one combined frame, so this set's view carries an
             # all-NaN column for every column introduced by *other* sets (e.g. the
             # DL_/DLPCT_/METHOD outputs of a previous delta). Drop those phantom
             # columns so they are not carried into the result as empty context —
             # but never drop the align key or an actual delta parameter.
+            df_base = base_sorted
             phantom = [c for c in df_base.columns
-                       if c != align_on and c not in valid_parms and df_base[c].isna().all()]
+                       if c != align_on and c not in valid_parms and base_all_nan[c]]
             if phantom:
                 df_base = df_base.drop(columns=phantom)
 
@@ -3408,22 +3439,28 @@ class UnichartNotebook:
                 base_interp = interp in ('base', 'both')
                 study_interp = interp in ('study', 'both')
 
-                merged = pd.DataFrame({align_on: x_arr})
+                # Collect columns in a dict and build the frame once — per-column
+                # df[c] = ... inserts fragment the frame (PerformanceWarning) on
+                # wide base sets.
+                data = {align_on: x_arr}
                 base_methods, study_methods = set(), set()
+                base_key = _nearest_key(df_base, align_on)
+                study_key = _nearest_key(df_study, align_on)
                 for c in df_base.columns:
                     if c == align_on:
                         continue
-                    merged[c], m = _read_col_at(
-                        df_base, align_on, c, x_arr, base_interp, base_spec)
+                    data[c], m = _read_col_at(
+                        df_base, align_on, c, x_arr, base_interp, base_spec, *base_key)
                     if pd.api.types.is_numeric_dtype(df_base[c]):
                         base_methods.add(m)
                 for c in df_study.columns:
                     if c == align_on:
                         continue
-                    merged[c], m = _read_col_at(
-                        df_study, align_on, c, x_arr, study_interp, study_spec)
+                    data[c], m = _read_col_at(
+                        df_study, align_on, c, x_arr, study_interp, study_spec, *study_key)
                     if pd.api.types.is_numeric_dtype(df_study[c]):
                         study_methods.add(m)
+                merged = pd.DataFrame(data)
 
             # Only parms that are numeric on BOTH sides can be subtracted. Anything
             # else (strings, categoricals, datetimes, object dtype) is carried
@@ -3442,14 +3479,19 @@ class UnichartNotebook:
                       f"values side-by-side (as '<name>' and '<name>_STUDY') instead.")
 
             # Deltas (numeric parms only): base value keeps its original name,
-            # study value is *_STUDY.
+            # study value is *_STUDY. Appended in one concat rather than
+            # per-column inserts, which fragment the frame.
+            delta_cols = {}
             for parm in numeric_parms:
                 b_col, s_col = parm, f"{parm}_STUDY"
-                merged[f"DL_{parm}"] = merged[s_col] - merged[b_col]
-                merged[f"DLPCT_{parm}"] = np.where(
+                delta_cols[f"DL_{parm}"] = merged[s_col] - merged[b_col]
+                delta_cols[f"DLPCT_{parm}"] = np.where(
                     merged[b_col] == 0, np.nan,
                     100 * ((merged[s_col] - merged[b_col]) / merged[b_col])
                 )
+            if delta_cols:
+                merged = pd.concat(
+                    [merged, pd.DataFrame(delta_cols, index=merged.index)], axis=1)
 
             # Which study *_STUDY columns survive into the result: explicit keeps,
             # every non-numeric parm (so a carried string is actually comparable),
@@ -3465,26 +3507,25 @@ class UnichartNotebook:
             #        non-numeric -> <P>, <P>_STUDY            (no delta)
             #   3. remaining base context columns (full base set, original names)
             #   4. study passthrough columns (<name>_STUDY)
-            result = merged[[align_on]].copy()
+            # Built as an ordered name list + one selection (not per-column
+            # inserts, which fragment the frame on wide base sets).
+            ordered = [align_on]
             for parm in valid_parms:
-                result[parm] = merged[parm]                       # base value (original name)
+                ordered.append(parm)                              # base value (original name)
                 s_col = f"{parm}_STUDY"
                 if parm in nonnumeric_parms:
-                    result[s_col] = merged[s_col]                 # study value, no delta
+                    ordered.append(s_col)                         # study value, no delta
                 else:
                     if s_col in study_keep_cols:
-                        result[s_col] = merged[s_col]             # study value (kept)
-                    result[f"DL_{parm}"] = merged[f"DL_{parm}"]
-                    result[f"DLPCT_{parm}"] = merged[f"DLPCT_{parm}"]
+                        ordered.append(s_col)                     # study value (kept)
+                    ordered.append(f"DL_{parm}")
+                    ordered.append(f"DLPCT_{parm}")
 
-            for c in df_base.columns:                             # remaining base context
-                if c not in result.columns:
-                    result[c] = merged[c]
-
-            for c in passed_valid:                                # study passthroughs
-                s_col = f"{c}_STUDY"
-                if s_col not in result.columns:
-                    result[s_col] = merged[s_col]
+            ordered.extend(c for c in df_base.columns             # remaining base context
+                           if c not in ordered)
+            ordered.extend(s_col for c in passed_valid            # study passthroughs
+                           if (s_col := f"{c}_STUDY") not in ordered)
+            result = merged.loc[:, list(dict.fromkeys(ordered))].copy()
 
             # On the x_ins path, every row is synthetic: record how each side's
             # numeric values were produced (regression label / 'Table' / 'Nearest').

@@ -4,7 +4,21 @@
       "Bash(python *)",
       "Bash(python3 *)",
       "Bash(jupyter nbconvert *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(awk 'NR>=754 && NR<=1108 && /variable_formats|var_fmt|_resolve_var_format/{print NR\": \"$0}' unichart.py)",
+      "Bash(awk 'NR>=1850 && NR<=1970 && /^def /{print NR\": \"$0}' unichart.py)",
+      "Bash(echo \"=== EXIT: $? ===\")",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(git -C /home/tom/Documents/GitHub/toms_utils status --short)",
+      "Bash(jupyter --version)",
+      "Bash(awk 'NR>=3678 && NR<=3880 && /return|fig.show/' unichart.py)",
+      "Bash(sed -n '1,20p')",
+      "Bash(sed -n '2174,2205p' /home/tom/Documents/GitHub/toms_utils/unichart.py)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/repro_delta.py)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/repro3.py)",
+      "Read(//home/tom/.claude/jobs/fa5372b8/tmp/**)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py save baseline.pkl)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py check baseline.pkl)"
     ]
   }
 }
