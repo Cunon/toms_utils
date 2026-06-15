@@ -1075,7 +1075,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
 
 def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                         suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
-                        darkmode=True, x_lim=None, y_lim=None,
+                        darkmode=False, x_lim=None, y_lim=None,
                         axis_limits=None, return_axes=False):
 
     active_datasets = [d for d in list_of_datasets if d.select]
@@ -1555,15 +1555,23 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
 def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
                             bin_size=None, bin_start=None, bin_end=None,
                             histnorm='', barmode='overlay', alpha=0.7,
+                            variable_formats=None,
                             color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None,
                             darkmode=False, x_lim=None, return_axes=False,
                             opacity=None):
     """
     Create a unified histogram where Subplots are organized by Dataset.
+
+    With one subplot per dataset, the histogrammed x-variables are what color
+    distinguishes. A per-variable ``variable_formats`` override supplies that
+    variable's ``color`` (and/or ``alpha``), taking precedence over the global
+    ``color`` arg and the default per-variable color cycle. Other format
+    attributes have no meaning for a histogram and are ignored.
     """
     if opacity is not None:
         warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
         alpha = opacity
+    variable_formats = variable_formats or {}
     active_ds = [d for d in list_of_datasets if d.select]
     x_list = x if isinstance(x, list) else [x]
     n_sets = len(active_ds)
@@ -1599,19 +1607,23 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
             clean_data = df.dropna(subset=subset_cols)
             if clean_data.empty: continue
             
-            if color:
+            var_fmt = variable_formats.get(xi, {})
+            if var_fmt.get('color'):
+                use_color = var_fmt['color']
+            elif color:
                 use_color = color
             elif len(x_list) == 1:
                 use_color = ds.color
             else:
                 use_color = color_cycle[idx_x % len(color_cycle)]
+            use_alpha = var_fmt.get('alpha', alpha)
 
             trace_args = dict(
                 x=clean_data[xi],
                 name=xi,
                 legendgroup=xi,
                 marker_color=use_color,
-                opacity=alpha,
+                opacity=use_alpha,
                 nbinsx=nbins,
                 xbins=xbins,
                 histnorm=histnorm,
@@ -1894,12 +1906,18 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
 
     return _show_or_return(fig, return_axes)
 
-def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmode=False,
+def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
+                         suptitle=None, darkmode=False,
                          figsize=(12, 8), axis_limits=None, return_axes=False):
     """
     Creates a single grouped bar chart where the X-axis is the Dataset name,
     and the bars are the different Y-variables, each scaled to their own Y-axis.
     Includes an 'agg' parameter to handle multi-row datasets.
+
+    Per-variable ``variable_formats`` overrides apply here: a variable's
+    ``color`` recolors its bar and its Y-axis (overriding the default color
+    cycle), and ``alpha`` sets the bar opacity. Other format attributes
+    (marker/linestyle/etc.) have no meaning in this chart and are ignored.
     """
     active_ds = [d for d in list_of_datasets if d.select]
     if not active_ds:
@@ -1908,6 +1926,7 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
 
     y_list = y if isinstance(y, list) else [y]
     axis_limits = axis_limits or {}
+    variable_formats = variable_formats or {}
     color_cycle = px.colors.qualitative.Plotly
 
     fig = go.Figure()
@@ -1920,7 +1939,9 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
     x_domain_end = max(0.5, 1.0 - required_space) 
 
     for idx_y, yi in enumerate(y_list):
-        var_color = color_cycle[idx_y % len(color_cycle)]
+        var_fmt = variable_formats.get(yi, {})
+        var_color = var_fmt.get('color', color_cycle[idx_y % len(color_cycle)])
+        var_alpha = var_fmt.get('alpha')
 
         y_data = []
         for ds in active_ds:
@@ -1950,7 +1971,8 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', suptitle=None, darkmod
             y=y_data,
             yaxis=y_axis_name,
             offsetgroup=str(idx_y),
-            marker_color=var_color
+            marker_color=var_color,
+            opacity=var_alpha if var_alpha is not None else 1.0
         ))
 
         axis_layout = dict(
@@ -4033,6 +4055,20 @@ class UnichartNotebook:
 
         return fig
 
+    def _finalize(self, fig, suppress_legends):
+        """Shared tail for every plotting method: apply font sizes, optionally
+        collapse traces to legend-only, and cache the figure as ``last_fig``.
+
+        This is the one step a new plotting method must not forget — keeping the
+        ``self.last_fig`` cache contract in a single place. Grid sizing, decorations,
+        and axis-limit ranges stay in each method, since those differ per plot type.
+        """
+        fig = self._apply_fonts(fig)
+        if fig is not None and suppress_legends:
+            fig.update_traces(visible='legendonly')
+        self.last_fig = fig
+        return fig
+
     # ------------------------------------------------------------------
     # Main Plot Function
     # ------------------------------------------------------------------
@@ -4121,18 +4157,8 @@ class UnichartNotebook:
         else:
             plot_pairs = [(x_list[0], yi) for yi in y_list]
 
-        if mode == 'vars':
-            n_items = len(plot_pairs)
-        else:
-            n_items = len(active_sets)
-
-        if ncols is None and nrows is None:
-            calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
-        elif ncols is None:
-            calc_ncols = int(np.ceil(n_items / nrows))
-        else:
-            calc_ncols = ncols
-        calc_ncols = max(1, calc_ncols)
+        n_items = len(plot_pairs) if mode == 'vars' else len(active_sets)
+        calc_ncols = max(1, _calc_grid(n_items, nrows, ncols)[1])
 
         fig = self._apply_decorations(
             fig, x_list, y_list, mode, calc_ncols,
@@ -4147,17 +4173,12 @@ class UnichartNotebook:
                 if yi in self.axis_limits:
                     fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-        if fig is not None:
-            fig.update_layout(
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            xanchor="left", x=0),
-                margin=dict(r=80),
-            )
-        fig = self._apply_fonts(fig)
-        if fig and suppress_legends:
-            fig.update_traces(visible='legendonly')
-        self.last_fig = fig
-        return fig
+        fig.update_layout(
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0),
+            margin=dict(r=80),
+        )
+        return self._finalize(fig, suppress_legends)
 
     # ------------------------------------------------------------------
     # Multi-Y plot wrapper
@@ -4227,19 +4248,19 @@ class UnichartNotebook:
                                   fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
 
-        fig = self._apply_fonts(fig)
-        if suppress_legends:
-            fig.update_traces(visible='legendonly')
-        self.last_fig = fig
-        return fig
+        return self._finalize(fig, suppress_legends)
 
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
     def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
-            figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
+
+        `color` forces a single bar color for the default `by='vars'` view
+        (mirroring `box`/`histogram`); the `by='sets'` and `by='dataset_x'`
+        views color per dataset / per variable and ignore it.
 
         Marker overlay formatting is controlled via `var_format`. Examples:
             nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
@@ -4258,31 +4279,29 @@ class UnichartNotebook:
                 print("Warning: `markers` is not supported with by='dataset_x'.")
             fig = unibar_datasets_as_x(
                 list_of_datasets=self.sets, y=y_list, agg=agg,
-                suptitle=self.suptitle, figsize=figsize, 
+                variable_formats=self.variable_formats,         # <-- pass through
+                suptitle=suptitle or self.suptitle, figsize=figsize,
                 darkmode=self.darkmode, axis_limits=self.axis_limits, return_axes=True
             )
             if fig:
                 fig = self._apply_decorations(fig, [], y_list, 'global', 1)
-                fig = self._apply_fonts(fig)
-                if suppress_legends:
-                    fig.update_traces(visible='legendonly')
-                self.last_fig = fig
+                fig = self._finalize(fig, suppress_legends)
             return fig
-            
+
         elif by in ['sets', 'datasets']:
             fig = unibar_per_dataset(
                 list_of_datasets=self.sets, x=x, y=y, markers=markers,
                 variable_formats=self.variable_formats,         # <-- pass through
                 barmode=barmode,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
-                darkmode=self.darkmode, return_axes=True 
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                darkmode=self.darkmode, return_axes=True
             )
         else:
             fig = unibar(
                 list_of_datasets=self.sets, x=x, y=y, markers=markers,
                 variable_formats=self.variable_formats,         # <-- pass through
-                barmode=barmode,
-                suptitle=self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
+                barmode=barmode, color=color,
+                suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, return_axes=True 
             )
 
@@ -4292,13 +4311,7 @@ class UnichartNotebook:
 
             active_sets = [d for d in self.sets if d.select]
             n_items = len(active_sets) if by in ['sets', 'datasets'] else len(y_list)
-            
-            calc_ncols = ncols
-            if calc_ncols is None and nrows is None:
-                calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
-            elif calc_ncols is None:
-                calc_ncols = int(np.ceil(n_items / nrows))
-            calc_ncols = max(1, calc_ncols)
+            calc_ncols = max(1, _calc_grid(n_items, nrows, ncols)[1])
 
             if by in ['sets', 'datasets']:
                 primary_y = y_list[0]
@@ -4315,11 +4328,8 @@ class UnichartNotebook:
             dec_items = [(x, yi) for yi in y_list] if dec_mode == 'vars' else None
             fig = self._apply_decorations(fig, [], y_list, dec_mode, calc_ncols, dec_items)
 
-            fig = self._apply_fonts(fig)
-            if suppress_legends:
-                fig.update_traces(visible='legendonly')
-            self.last_fig = fig
-            
+            fig = self._finalize(fig, suppress_legends)
+
         return fig
 
     # ------------------------------------------------------------------
@@ -4352,10 +4362,7 @@ class UnichartNotebook:
                                 xanchor="left", x=0),
                     margin=dict(r=80),
                 )
-                fig = self._apply_fonts(fig)
-                if suppress_legends:
-                    fig.update_traces(visible='legendonly')
-                self.last_fig = fig
+                fig = self._finalize(fig, suppress_legends)
             return fig
 
         elif by in ['sets', 'datasets']:
@@ -4376,14 +4383,7 @@ class UnichartNotebook:
             )
             
             if fig:
-                active_sets = [d for d in self.sets if d.select]
-                n_items = len(y_list)
-                calc_ncols = ncols
-                if calc_ncols is None and nrows is None:
-                    calc_ncols = min(3, max(1, int(np.ceil(np.sqrt(n_items)))))
-                elif calc_ncols is None:
-                    calc_ncols = int(np.ceil(n_items / nrows))
-                calc_ncols = max(1, calc_ncols)
+                calc_ncols = max(1, _calc_grid(len(y_list), nrows, ncols)[1])
 
                 for idx, yi in enumerate(y_list):
                     if yi in self.axis_limits:
@@ -4397,12 +4397,7 @@ class UnichartNotebook:
             if by in ['sets', 'datasets']:
                 fig = self._apply_decorations(fig, [], y_list, 'sets', 1)
             else:
-                _n = len(y_list)
-                _nc = ncols if ncols is not None else (
-                    int(np.ceil(_n / nrows)) if nrows is not None
-                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
-                )
-                _nc = max(1, _nc)
+                _nc = max(1, _calc_grid(len(y_list), nrows, ncols)[1])
                 fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
                                               [(x, yi) for yi in y_list])
             fig.update_layout(
@@ -4410,10 +4405,7 @@ class UnichartNotebook:
                             xanchor="left", x=0),
                 margin=dict(r=80),
             )
-            fig = self._apply_fonts(fig)
-            if suppress_legends:
-                fig.update_traces(visible='legendonly')
-            self.last_fig = fig
+            fig = self._finalize(fig, suppress_legends)
 
         return fig
 
@@ -4448,7 +4440,8 @@ class UnichartNotebook:
             fig = unihistogram_by_dataset(
                 list_of_datasets=self.sets, x=x, y=y, histfunc=histfunc, nbins=nbins,
                 bin_size=bin_size, bin_start=bin_start, bin_end=bin_end,
-                histnorm=histnorm, barmode=barmode, alpha=alpha, color=color,
+                histnorm=histnorm, barmode=barmode, alpha=alpha,
+                variable_formats=self.variable_formats, color=color,
                 suptitle=suptitle or self.suptitle, figsize=figsize, ncols=ncols, nrows=nrows,
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
@@ -4463,20 +4456,11 @@ class UnichartNotebook:
                 darkmode=self.darkmode, x_lim=limit, return_axes=True
             )
             if fig:
-                _n = len(x_list)
-                _nc = ncols if ncols is not None else (
-                    int(np.ceil(_n / nrows)) if nrows is not None
-                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
-                )
-                _nc = max(1, _nc)
+                _nc = max(1, _calc_grid(len(x_list), nrows, ncols)[1])
                 fig = self._apply_decorations(fig, x_list, [], 'vars', _nc,
                                               [(xi, None) for xi in x_list])
 
-        fig = self._apply_fonts(fig)
-        if fig and suppress_legends:
-            fig.update_traces(visible='legendonly')
-        self.last_fig = fig
-        return fig
+        return self._finalize(fig, suppress_legends)
         
     # ------------------------------------------------------------------
     # The contour Command
@@ -4539,20 +4523,12 @@ class UnichartNotebook:
             if by in ['sets', 'datasets']:
                 fig = self._apply_decorations(fig, [x], [y], 'sets', 1)
             else:
-                _n = len(z_list)
-                _nc = ncols if ncols is not None else (
-                    int(np.ceil(_n / nrows)) if nrows is not None
-                    else min(3, max(1, int(np.ceil(np.sqrt(_n)))))
-                )
-                _nc = max(1, _nc)
+                _nc = max(1, _calc_grid(len(z_list), nrows, ncols)[1])
                 fig = self._apply_decorations(fig, [x], [y], 'vars', _nc,
                                               [(x, y) for _ in z_list])
-            fig = self._apply_fonts(fig)
             if limit_x: fig.update_xaxes(range=limit_x)
             if limit_y: fig.update_yaxes(range=limit_y)
-            if suppress_legends:
-                fig.update_traces(visible='legendonly')
-            self.last_fig = fig
+            fig = self._finalize(fig, suppress_legends)
 
         return fig
 
