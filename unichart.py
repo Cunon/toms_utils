@@ -2435,7 +2435,16 @@ class UnichartNotebook:
         self.darkmode = False 
         self.last_ncols = None
         self.last_nrows = None
-        self.last_fig = None 
+        self.last_fig = None
+
+        # When True, plotting methods return a flat inline PNG instead of an
+        # interactive Plotly figure. Interactive figures embed plotly.js in the
+        # notebook (large files, esp. with many plots); static PNGs keep size
+        # down. last_fig still caches the real figure, so save_png/re-styling
+        # keep working. Toggle via set_static_images. static_scale = PNG
+        # resolution multiplier. Requires 'kaleido' (falls back to interactive).
+        self.static_images = False
+        self.static_scale = 2
 
         self.suptitle = None
         # Optional text box pinned to the bottom of the figure (caption/footnote).
@@ -4384,7 +4393,68 @@ class UnichartNotebook:
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
         self.last_fig = fig
+        if self.static_images and fig is not None:
+            return self._render_static(fig)
         return fig
+
+    @staticmethod
+    def _suppress_mathjax():
+        """Disable Plotly's MathJax so static images don't carry the
+        'Loading [MathJax]...' artifact. Shared by save_png and the static
+        render path so the two can't drift."""
+        import plotly.io as pio
+        pio.defaults.mathjax = None
+
+    def _render_static(self, fig):
+        """Render ``fig`` to a flat inline PNG to keep notebook size down.
+
+        Falls back to returning the interactive figure (warning once) if static
+        rendering fails — e.g. 'kaleido' isn't installed — so a missing dep
+        degrades to interactive plots rather than making every plot vanish."""
+        try:
+            from IPython.display import Image
+            self._suppress_mathjax()
+            return Image(fig.to_image(format="png", scale=self.static_scale))
+        except Exception as e:
+            if not getattr(self, '_static_warned', False):
+                print(f"Static image render failed ({e}); falling back to "
+                      "interactive plots. Is 'kaleido' installed?")
+                self._static_warned = True
+            return fig
+
+    def set_static_images(self, enabled=True, scale=None):
+        """Return plots as flat inline PNGs instead of interactive Plotly HTML.
+
+        Interactive figures embed plotly.js in the notebook, bloating file size
+        — especially with many plots. Enabling this makes every plotting method
+        return a static PNG (via ``IPython.display.Image``) instead, while
+        ``last_fig`` still caches the real figure so ``save_png`` and re-styling
+        keep working. Requires the 'kaleido' package; if it's missing, plots
+        fall back to interactive automatically.
+
+        Note: with static mode on, plotting methods return an ``Image``, not a
+        Plotly ``Figure``, so you can't chain ``.update_layout(...)`` on the
+        return value — use ``nb.last_fig`` for that.
+
+        Parameters
+        ----------
+        enabled : bool — turn static images on (default) or off.
+        scale : float > 0, optional — PNG resolution multiplier (default 2).
+
+        Examples
+        --------
+        nb.set_static_images()            # on, keeps notebook small
+        nb.set_static_images(scale=3)     # higher-resolution PNGs
+        nb.set_static_images(False)       # back to interactive figures
+        """
+        self.static_images = bool(enabled)
+        if scale is not None:
+            if (isinstance(scale, bool) or not isinstance(scale, (int, float))
+                    or scale <= 0):
+                raise ValueError(f"scale must be a positive number, got {scale!r}")
+            self.static_scale = scale
+        state = "on" if self.static_images else "off"
+        print(f"Static images {state} (scale={self.static_scale}).")
 
     # ------------------------------------------------------------------
     # Main Plot Function
@@ -5288,8 +5358,7 @@ class UnichartNotebook:
             return
 
         try:
-            import plotly.io as pio
-            pio.defaults.mathjax = None 
+            self._suppress_mathjax()
 
             self.last_fig.write_image(filename, scale=scale, width=width, height=height)
             print(f"Plot saved to {filename}")

@@ -27,7 +27,8 @@
       "Bash(awk 'NR>=4322&&NR<=4326||NR>=4404&&NR<=4408' unichart.py)",
       "Bash(/usr/bin/git diff *)",
       "Bash(git --version)",
-      "Bash(awk '/^    def [a-z]/{m=$0; ln=NR} /_finalize\\\\\\(/{print ln\": \"m\" -> _finalize@\"NR}' unichart.py)"
+      "Bash(awk '/^    def [a-z]/{m=$0; ln=NR} /_finalize\\\\\\(/{print ln\": \"m\" -> _finalize@\"NR}' unichart.py)",
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/smoke_static.py)"
     ]
   }
 }
