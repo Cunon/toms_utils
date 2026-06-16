@@ -21,7 +21,13 @@
       "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 delta_cases.py check baseline.pkl)",
       "Bash(command -v git)",
       "Bash(git -C /home/tom/Documents/GitHub/toms_utils show HEAD:unichart.py)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(cd *)",
+      "Bash(awk 'NR>=4130 && NR<=4252 && /def [a-z]/ {print NR\": \"$0}' unichart.py)",
+      "Bash(awk 'NR>=4322&&NR<=4326||NR>=4404&&NR<=4408' unichart.py)",
+      "Bash(/usr/bin/git diff *)",
+      "Bash(git --version)",
+      "Bash(awk '/^    def [a-z]/{m=$0; ln=NR} /_finalize\\\\\\(/{print ln\": \"m\" -> _finalize@\"NR}' unichart.py)"
     ]
   }
 }

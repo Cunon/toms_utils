@@ -131,16 +131,109 @@ def _calc_grid(n, nrows, ncols):
         ncols = int(np.ceil(n / nrows))
     return nrows, ncols
 
+# Top-of-figure spacing estimates (px) used to reserve room for a (possibly
+# multi-line) suptitle above a horizontal "above" legend so the legend can't
+# grow up into the title. Per-line title height scales with the title font size:
+# _base_layout assumes the default font, and _apply_fonts re-reserves the space
+# once a custom suptitle size (set via set_font_sizes) is known.
+_TITLE_TOP_PAD = 12             # gap above the first title line
+_DEFAULT_TITLE_FONT_PX = 18     # approximates Plotly's default suptitle font
+_TITLE_LINE_FACTOR = 1.45       # title line height = font size * this
+_LEGEND_ROW_PX = 26             # space reserved for the first legend row
+_LEGEND_GAP    = 12             # gap title→legend and legend→plot
+
+
+def _title_lines(text):
+    """Number of rendered lines in a Plotly title string. Counts <br> and
+    treats a literal newline as a line break too (it is normalized to <br>
+    elsewhere before rendering)."""
+    if not text:
+        return 1
+    return text.replace('\n', '<br>').count('<br>') + 1
+
+
+def _top_space(title_text, figsize, has_above_legend, title_font_size=None):
+    """Geometry that reserves vertical space for a (possibly multi-line)
+    suptitle so a horizontal "above" legend can't cover it.
+
+    ``title_font_size`` is the suptitle font size in px; when ``None`` the
+    Plotly default is assumed. Per-line height scales with it so a large custom
+    title font still gets enough room.
+
+    Returns ``(top_margin_px, title_pos, legend_pos)``. ``title_pos`` is merged
+    into ``layout.title`` (pins it to the top of the figure container);
+    ``legend_pos`` is merged into ``layout.legend`` when ``has_above_legend``
+    (pins the legend's *top* just below the title, in container coords, so extra
+    legend rows grow downward toward the plot rather than up into the title).
+    ``legend_pos`` is ``None`` when there is no above-legend.
+    """
+    height = (figsize[1] * 100) if figsize else 800
+    font = title_font_size or _DEFAULT_TITLE_FONT_PX
+    n_lines = _title_lines(title_text)
+    line_px = font * _TITLE_LINE_FACTOR
+    # Headroom above the first line grows with the font so large titles aren't
+    # clipped at the figure's top edge.
+    top_pad = _TITLE_TOP_PAD + max(0.0, font - _DEFAULT_TITLE_FONT_PX) * 0.9
+    title_band = top_pad + n_lines * line_px + _LEGEND_GAP
+    if has_above_legend:
+        top_margin = title_band + _LEGEND_ROW_PX + _LEGEND_GAP
+    else:
+        top_margin = title_band + _TITLE_TOP_PAD
+
+    title_pos = {'y': 1.0 - top_pad / height, 'yanchor': 'top', 'yref': 'container'}
+    legend_pos = None
+    if has_above_legend:
+        legend_pos = {'orientation': 'h', 'yanchor': 'top',
+                      'y': 1.0 - title_band / height, 'yref': 'container'}
+    return top_margin, title_pos, legend_pos
+
+
+def _above_legend_layout(suptitle, figsize):
+    """Ready ``(legend, top_margin)`` for a standalone horizontal above-legend,
+    matching the geometry ``_base_layout`` applies. Used where the legend is set
+    via a direct ``update_layout`` rather than through ``_base_layout``."""
+    top_margin, _, legend_pos = _top_space(suptitle, figsize, True)
+    legend = {'xanchor': 'left', 'x': 0, **legend_pos}
+    return legend, top_margin
+
+
+# Footer (bottom text box) spacing. Mirrors the suptitle math but reserves
+# space at the *bottom*; the default font is Plotly's annotation default.
+_FOOTER_PAD = 10              # gap below the last footer line / above the band
+_DEFAULT_FOOTER_FONT_PX = 12  # Plotly's default annotation font size
+
+
+def _bottom_space(footer_text, footer_font_size=None):
+    """Bottom margin (px) to reserve for a (possibly multi-line) footer, *in
+    addition* to the axis-label margin, so the footer sits below the labels
+    without overlapping them. Per-line height scales with the footer font."""
+    font = footer_font_size or _DEFAULT_FOOTER_FONT_PX
+    n_lines = _title_lines(footer_text)
+    return _FOOTER_PAD + n_lines * font * _TITLE_LINE_FACTOR + _FOOTER_PAD
+
+
 def _base_layout(darkmode, suptitle, figsize, **extra):
-    title_defaults = {'x': 0.5, 'yref': 'container', 'y': 0.99, 'yanchor': 'top'}
     incoming_title = extra.pop('title', {})
     if isinstance(incoming_title, str):
         incoming_title = {'text': incoming_title}
     if 'text' not in incoming_title:
         incoming_title['text'] = suptitle
-    merged_title = {**title_defaults, **incoming_title}
+    # Normalize "\n" to Plotly's "<br>" so newline-style titles both render and
+    # get counted as multiple lines for space reservation.
+    if incoming_title.get('text'):
+        incoming_title['text'] = incoming_title['text'].replace('\n', '<br>')
 
-    default_margin = {'t': 100}
+    incoming_legend = extra.pop('legend', None)
+    has_above = (isinstance(incoming_legend, dict)
+                 and incoming_legend.get('orientation') == 'h')
+
+    top_margin, title_pos, legend_pos = _top_space(
+        incoming_title.get('text'), figsize, has_above)
+
+    title_defaults = {'x': 0.5, 'xanchor': 'center'}
+    merged_title = {**title_defaults, **incoming_title, **title_pos}
+
+    default_margin = {'t': top_margin}
     incoming_margin = extra.pop('margin', {})
     merged_margin = {**default_margin, **incoming_margin}
 
@@ -150,6 +243,12 @@ def _base_layout(darkmode, suptitle, figsize, **extra):
         'margin': merged_margin,
         **extra
     }
+    if legend_pos is not None:
+        # caller's x/xanchor/font win; vertical geometry (legend_pos) is forced.
+        legend_defaults = {'xanchor': 'left', 'x': 0}
+        args['legend'] = {**legend_defaults, **incoming_legend, **legend_pos}
+    elif incoming_legend is not None:
+        args['legend'] = incoming_legend
     if figsize:
         args['width'] = figsize[0] * 100
         args['height'] = figsize[1] * 100
@@ -180,6 +279,21 @@ def _subplot_refs(row, col, ncols):
 # -----------------------------------------------------------------------------
 _VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha')
 
+# Built-in per-dataset style defaults applied to newly loaded sets. Each
+# UnichartNotebook copies these into ``self.default_format``; ``set_default_format``
+# overrides them so that *future* loaded datasets (and ``reset_format``) pick up
+# the new styling — the markersize/linewidth analogue of color_map/marker_map.
+# Color and marker are excluded: those are assigned by index via color_map/marker_map.
+_DATASET_FORMAT_DEFAULTS = {
+    'markersize': 10,
+    'linestyle':  None,
+    'linewidth':  2,
+    'edgewidth':  1,
+    'edge_color': 'black',
+    'alpha':      1,
+    'fill':       True,
+}
+
 def _resolve_var_format(dataset, variable, variable_formats=None):
     """
     Per-attribute precedence: variable_formats wins, else dataset attr.
@@ -201,6 +315,15 @@ def _resolve_var_format(dataset, variable, variable_formats=None):
         'edgewidth':  getattr(dataset, 'edgewidth', 1),
         'fill':       getattr(dataset, 'fill', True),
     }
+
+
+def _fill_marker_kw(color, fill, edgewidth=1):
+    """Marker color/outline keys honoring a fill toggle: a solid ``color`` fill
+    when ``fill`` is True, or a hollow marker (transparent fill, ``color``
+    outline) when False. Mirrors the hollow-marker handling in ``uniplot``."""
+    if fill:
+        return {'color': color}
+    return {'color': 'rgba(0,0,0,0)', 'line': dict(width=edgewidth, color=color)}
 
 # -----------------------------------------------------------------------------
 # Dataset Class
@@ -370,20 +493,23 @@ class Dataset:
         self.title_format = f"{self.title} {index}"
 
         self._color = notebook._color_at(index)
-
         self._marker = notebook._marker_at(index)
-        self._edge_color = "black"
-        self._fill = True
-        self._linestyle = None
-        self.markersize = 10
-        self.alpha = 1
+
+        # Per-dataset style defaults come from the notebook so set_default_format
+        # controls how future loaded datasets look. Falls back to the built-ins.
+        fmt = getattr(notebook, 'default_format', _DATASET_FORMAT_DEFAULTS)
+        self._edge_color = fmt.get('edge_color', 'black')
+        self._fill = fmt.get('fill', True)
+        self._linestyle = fmt.get('linestyle', None)
+        self.markersize = fmt.get('markersize', 10)
+        self.alpha = fmt.get('alpha', 1)
         self.hue = ""
         self.hue_palette = "Jet"
         self.hue_order = None
         self.reg_order = None
         self.style = None
-        self.linewidth = 2
-        self.edgewidth = 1
+        self.linewidth = fmt.get('linewidth', 2)
+        self.edgewidth = fmt.get('edgewidth', 1)
         self.set_type = 1
         self.data_type = 'discrete'
         self.delta_sets = None
@@ -907,6 +1033,7 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
         title={'text': suptitle or (f"{x} vs {[str(yi) for yi in y_list]}" if len(x_list) == 1 else f"{x_list} vs {y_list}"), 'x': 0.5, 'xanchor': 'center'},
         showlegend=(legend != 'off'),
         margin=dict(r=right_margin),
+        **({'legend': dict(orientation="h")} if legend == 'above' else {}),
     ))
 
     for dataset in list_of_datasets:
@@ -1068,8 +1195,6 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
     if not grid:
         fig.update_xaxes(showgrid=False)
         fig.update_yaxes(showgrid=False)
-    if legend == 'above':
-        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
 
     return _show_or_return(fig, return_axes)
 
@@ -1155,7 +1280,8 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                     mode='lines+markers' if dataset.linestyle else 'markers',
                     name=primary_y, legendgroup=primary_y,
                     showlegend=(idx_ds == 0),
-                    marker=dict(color=color0, size=dataset.markersize or 6),
+                    marker=dict(size=dataset.markersize or 6,
+                                **_fill_marker_kw(color0, dataset.fill, dataset.edgewidth)),
                     line=dict(color=color0, **line_dict),
                     customdata=hover_cd, hovertemplate=ht,
                 ),
@@ -1186,9 +1312,9 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                     name=yi, legendgroup=yi,
                     showlegend=(idx_ds == 0),
                     marker=dict(
-                        color=color_k,
                         size=dataset.markersize or 6,
                         symbol='circle' if k == 0 else 'diamond',
+                        **_fill_marker_kw(color_k, dataset.fill, dataset.edgewidth),
                     ),
                     line=dict(color=color_k, **line_dict),
                     customdata=hover_cd, hovertemplate=ht,
@@ -1227,8 +1353,7 @@ def unibar(list_of_datasets, x, y, markers=None, variable_formats=None,
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Bar Comparison: {x}", figsize,
         barmode=barmode, showlegend=True,
-        margin=dict(t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        legend=dict(orientation="h")
     ))
 
     edge_default = 'white' if darkmode else 'black'
@@ -1330,8 +1455,7 @@ def unibar_per_dataset(list_of_datasets, x, y, markers=None, variable_formats=No
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Bar Comparison", figsize,
         barmode=barmode,
-        margin=dict(t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        legend=dict(orientation="h")
     ))
 
     edge_default = 'white' if darkmode else 'black'
@@ -1406,8 +1530,8 @@ def unibox(list_of_datasets, x, y, boxmode='group', points='outliers', notched=F
     fig.update_layout(**_base_layout(
         darkmode, suptitle or f"Boxplot Comparison: {x}", figsize,
         boxmode=boxmode, showlegend=True,
-        margin=dict(t=120, r=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(r=80),
+        legend=dict(orientation="h"),
     ))
 
     for ds in list_of_datasets:
@@ -1454,8 +1578,8 @@ def unibox_per_dataset(list_of_datasets, x, y, boxmode='group', points='outliers
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Box Comparison", figsize,
         boxmode=boxmode, showlegend=True,
-        margin=dict(t=120, r=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(r=80),
+        legend=dict(orientation="h"),
     ))
 
     for idx_ds, ds in enumerate(active_ds):
@@ -1503,8 +1627,7 @@ def unihistogram(list_of_datasets, x, y=None, histfunc='sum', nbins=None,
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Distribution Comparison", figsize,
         barmode=barmode, showlegend=True,
-        margin=dict(t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        legend=dict(orientation="h")
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1587,8 +1710,7 @@ def unihistogram_by_dataset(list_of_datasets, x, y=None, histfunc='sum', nbins=N
     fig.update_layout(**_base_layout(
         darkmode, suptitle or "Dataset Distribution Analysis", figsize,
         barmode=barmode, showlegend=True,
-        margin=dict(t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        legend=dict(orientation="h")
     ))
 
     xbins = _build_xbins(bin_size, bin_start, bin_end)
@@ -1741,8 +1863,8 @@ def unicontour(list_of_datasets, x, y, z, contours_coloring='fill', colorscale=N
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
         title={'text': suptitle or f"Contour: {y} vs {x}", 'x': 0.5, 'xanchor': 'center', 'y': 0.98, 'yanchor': 'top', 'yref': 'container'},
-        showlegend=True, margin=dict(r=100, t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        showlegend=True, margin=dict(r=100),
+        legend=dict(orientation="h"),
     ))
 
     for idx_ds, ds in enumerate(active_ds):
@@ -1837,8 +1959,8 @@ def unicontour_per_dataset(list_of_datasets, x, y, z, contours_coloring='fill', 
     fig.update_layout(**_base_layout(
         darkmode, None, figsize,
         title={'text': suptitle or "Dataset Contour Comparison", 'x': 0.5, 'y': 0.98, 'yref': 'container'},
-        showlegend=True, margin=dict(r=100, t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        showlegend=True, margin=dict(r=100),
+        legend=dict(orientation="h"),
     ))
 
     for idx_ds, ds in enumerate(active_ds):
@@ -1999,8 +2121,8 @@ def unibar_datasets_as_x(list_of_datasets, y, agg='mean', variable_formats=None,
         darkmode, suptitle or f"Variables by Dataset ({agg})", figsize,
         barmode='group',
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
-        margin=dict(r=50 + (extras_count * 80), t=120),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        margin=dict(r=50 + (extras_count * 80)),
+        legend=dict(orientation="h")
     ))
 
     return _show_or_return(fig, return_axes)
@@ -2092,8 +2214,8 @@ def unibox_datasets_as_x(list_of_datasets, y, boxmode='group', points='outliers'
         darkmode, suptitle or "Variables by Dataset", figsize,
         boxmode=boxmode,
         xaxis=dict(domain=[0, x_domain_end], title="Dataset"),
-        margin=dict(t=120, r=50 + (extras_count * 80)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(r=50 + (extras_count * 80)),
+        legend=dict(orientation="h"),
     ))
 
     return _show_or_return(fig, return_axes)
@@ -2274,7 +2396,7 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
     layout_extras = dict(
         showlegend=(legend != 'off'),
         xaxis=dict(domain=[0, x_domain_end], title=xlabel or x),
-        margin=dict(r=60 + extras * 70, t=120 if legend == 'above' else 100),
+        margin=dict(r=60 + extras * 70),
     )
     if x_lim:
         layout_extras['xaxis']['range'] = x_lim
@@ -2282,8 +2404,8 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
         layout_extras['xaxis']['range'] = axis_limits[x]
 
     if legend == 'above':
-        layout_extras['legend'] = dict(orientation='h', yanchor='bottom',
-                                       y=1.01, xanchor='center', x=0.5)
+        # vertical geometry filled in by _base_layout; keep the centered x.
+        layout_extras['legend'] = dict(orientation='h', xanchor='center', x=0.5)
 
     fig.update_layout(**_base_layout(
         darkmode,
@@ -2316,7 +2438,11 @@ class UnichartNotebook:
         self.last_fig = None 
 
         self.suptitle = None
-        
+        # Optional text box pinned to the bottom of the figure (caption/footnote).
+        # Like suptitle: set per-call via footer= or persist as this attribute.
+        # None = current behavior (no footer, no extra bottom margin reserved).
+        self.footer = None
+
         # Plot Decorations
         self.plot_title = None
         self.x_label = None
@@ -2347,7 +2473,19 @@ class UnichartNotebook:
         # use. Integer indexing cycles, so nb.marker_map[3] works on a 2-marker map.
         self.marker_map = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
 
+        # Per-dataset style defaults (markersize/linestyle/linewidth/edgewidth/
+        # edge_color/alpha/fill) applied to datasets as they're loaded. Change
+        # via set_default_format to restyle *future* loaded datasets; color and
+        # marker stay controlled by color_map/marker_map.
+        self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
+
+        # Optional fixed inner plot-area size (px, w/h, either may be None) so
+        # plots stay the same size regardless of suptitle/legend/margins. Set
+        # via set_plot_size; applied in _finalize. None = size driven by figsize.
+        self.plot_size = None
+
         self.suptitle_size = None
+        self.footer_size = None
         self.legend_size = None
         self.axes_title_size = None
         self.axes_tick_size = None
@@ -3231,18 +3369,21 @@ class UnichartNotebook:
         if sets:
             targets = (self.sets if uset_slice is None
                        else self._get_uset_slice(uset_slice))
+            fmt = getattr(self, 'default_format', _DATASET_FORMAT_DEFAULTS)
             for ds in targets:
-                ds._color     = self._color_at(ds.index)
-                ds._marker    = self._marker_at(ds.index)
-                ds._linestyle = None
-                ds.markersize = 10
-                ds.linewidth  = 2
-                ds.edgewidth  = 1
-                ds.alpha      = 1
-                ds.hue        = ""
+                ds._color      = self._color_at(ds.index)
+                ds._marker     = self._marker_at(ds.index)
+                ds._linestyle  = fmt.get('linestyle', None)
+                ds.markersize  = fmt.get('markersize', 10)
+                ds.linewidth   = fmt.get('linewidth', 2)
+                ds.edgewidth   = fmt.get('edgewidth', 1)
+                ds.alpha       = fmt.get('alpha', 1)
+                ds._edge_color = fmt.get('edge_color', 'black')
+                ds._fill       = fmt.get('fill', True)
+                ds.hue         = ""
                 ds.hue_palette = "Jet"
-                ds.hue_order  = None
-                ds.reg_order  = None
+                ds.hue_order   = None
+                ds.reg_order   = None
 
         if vars:
             self.variable_formats.clear()
@@ -3257,7 +3398,7 @@ class UnichartNotebook:
             self.axis_limits.clear()
 
         if fonts:
-            for attr in ('suptitle_size', 'legend_size', 'axes_title_size',
+            for attr in ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size',
                          'axes_tick_size', 'subplot_title_size',
                          'colorbar_size', 'hover_size'):
                 setattr(self, attr, None)
@@ -3270,6 +3411,70 @@ class UnichartNotebook:
         if scale:     parts.append("axis limits")
         if fonts:     parts.append("font sizes")
         print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
+
+    def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
+                           edgewidth=None, edge_color=None, alpha=None, fill=None,
+                           reset=False):
+        """Set the per-dataset style defaults applied to *future* loaded datasets.
+
+        The markersize/linewidth analogue of ``color_map``/``marker_map``: only
+        the values you pass change, others persist. Already-loaded datasets keep
+        their current styling — call ``reset_format()`` to re-apply the new
+        defaults to them. Color and marker remain controlled by ``color_map`` /
+        ``marker_map``. ``reset=True`` restores the built-in defaults.
+
+        Parameters
+        ----------
+        markersize, linewidth, edgewidth : float (>= 0)
+        alpha : float in [0, 1]
+        linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
+        edge_color : color string (named, hex, or rgb)
+        fill : bool (or truthy/falsy string) — filled vs. hollow markers
+
+        Examples
+        --------
+        nb.set_default_format(markersize=6, linestyle='--', linewidth=1)
+        nb.load_df(df, title='styled by the new defaults')
+        nb.set_default_format(reset=True)
+        """
+        if reset:
+            self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
+            print("Default dataset format reset to built-ins.")
+            return
+
+        def _num(name, val, lo=0.0, hi=None):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(f"{name} must be numeric, got {type(val).__name__}")
+            if val < lo or (hi is not None and val > hi):
+                rng = f">= {lo}" if hi is None else f"in [{lo}, {hi}]"
+                raise ValueError(f"{name} must be {rng}, got {val}")
+            return val
+
+        updates = {}
+        if markersize is not None: updates['markersize'] = _num('markersize', markersize)
+        if linewidth  is not None: updates['linewidth']  = _num('linewidth', linewidth)
+        if edgewidth  is not None: updates['edgewidth']  = _num('edgewidth', edgewidth)
+        if alpha      is not None: updates['alpha']      = _num('alpha', alpha, 0.0, 1.0)
+        if linestyle  is not None:
+            if not (validate_linestyle(linestyle)
+                    or linestyle in LINESTYLE_MAP_MPL_TO_PLOTLY.values()):
+                valid = ', '.join(sorted(map(str, LINESTYLE_MAP_MPL_TO_PLOTLY)))
+                raise ValueError(f"Invalid linestyle '{linestyle}'. Valid: {valid}")
+            updates['linestyle'] = linestyle
+        if edge_color is not None:
+            if not validate_color(edge_color):
+                raise ValueError(f"edge_color must be a color string, got {edge_color!r}")
+            updates['edge_color'] = edge_color
+        if fill is not None:
+            s = str(fill).lower()
+            if s in ('true', '1', 't', 'on'):
+                updates['fill'] = True
+            elif s in ('false', '0', 'f', 'off'):
+                updates['fill'] = False
+            else:
+                raise ValueError(f"Invalid value for fill: {fill}")
+
+        self.default_format.update(updates)
 
     def reg_info(self, uset_slice=None):
         """Print the regression type, equation, and fit stats (R², RMSE, MAE) for each dataset."""
@@ -3934,7 +4139,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Font Management
     # ------------------------------------------------------------------
-    def set_font_sizes(self, suptitle=None, legend=None, axes_title=None,
+    def set_font_sizes(self, suptitle=None, footer=None, legend=None, axes_title=None,
                     axes_tick=None, subplot_title=None, colorbar=None,
                     hover=None, table_header=None, table_cell=None, all=None, reset=False):
         """
@@ -3942,7 +4147,7 @@ class UnichartNotebook:
 
         Parameters
         ----------
-        suptitle, legend, axes_title, axes_tick, subplot_title, colorbar, hover : float or str
+        suptitle, footer, legend, axes_title, axes_tick, subplot_title, colorbar, hover : float or str
             Font sizes for plot elements.
         table_header : float or str
             Font size for table header row.
@@ -3953,7 +4158,7 @@ class UnichartNotebook:
         reset : bool
             Reset all font sizes to defaults.
         """
-        keys = ('suptitle_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
+        keys = ('suptitle_size', 'footer_size', 'legend_size', 'axes_title_size', 'axes_tick_size',
                 'subplot_title_size', 'colorbar_size', 'hover_size', 'table_header_size', 'table_cell_size')
 
         if reset:
@@ -3981,6 +4186,7 @@ class UnichartNotebook:
         base = _validate('all', all)
         resolved = {
             'suptitle_size':      _validate('suptitle', suptitle)           if suptitle      is not None else base,
+            'footer_size':        _validate('footer', footer)               if footer        is not None else base,
             'legend_size':        _validate('legend', legend)               if legend        is not None else base,
             'axes_title_size':    _validate('axes_title', axes_title)       if axes_title    is not None else base,
             'axes_tick_size':     _validate('axes_tick', axes_tick)         if axes_tick     is not None else base,
@@ -3999,6 +4205,7 @@ class UnichartNotebook:
         """Return a dict of currently configured font sizes (None = unset/default)."""
         return {
             'suptitle':       self.suptitle_size,
+            'footer':         self.footer_size,
             'legend':         self.legend_size,
             'axes_title':     self.axes_title_size,
             'axes_tick':      self.axes_tick_size,
@@ -4008,6 +4215,94 @@ class UnichartNotebook:
             'table_header':   getattr(self, 'table_header_size', None),
             'table_cell':     getattr(self, 'table_cell_size', None),
         }
+
+    # ------------------------------------------------------------------
+    # Plot-area sizing
+    # ------------------------------------------------------------------
+    def set_plot_size(self, width=None, height=None, reset=False):
+        """Pin the inner plot-area size so plots stay the same size regardless of
+        suptitle lines, legend rows, or other margin changes.
+
+        ``width``/``height`` are in inches (same units as ``figsize``). The figure
+        is grown to ``plot_area + margins``, so the drawing region is held constant
+        while margins absorb the title/legend. Pass only the dimension(s) you want
+        to pin — ``None`` leaves that dimension driven by ``figsize``. Each call
+        replaces the previous setting (calling with only ``height`` drops a prior
+        ``width`` pin). ``reset=True`` (or both ``None``) clears it.
+
+        Note: the arithmetic is exact when Plotly's margin ``autoexpand`` stays
+        inert, which it does for the suptitle and the (downward-growing) legend.
+        A colorbar (contour/hue) or very long tick labels can still autoexpand the
+        right/left margin and make that dimension come out slightly short.
+        """
+        if reset or (width is None and height is None):
+            self.plot_size = None
+            return
+
+        def _v(name, val):
+            if val is None:
+                return None
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                raise TypeError(f"{name} must be numeric (inches), got {type(val).__name__}")
+            if val <= 0:
+                raise ValueError(f"{name} must be positive, got {val}")
+            return val * 100
+
+        self.plot_size = (_v('width', width), _v('height', height))
+
+    def _enforce_plot_size(self, fig):
+        """Resize the figure so its inner plot area matches ``self.plot_size``.
+        No-op unless a plot size is pinned. Runs after fonts/margins are final."""
+        if fig is None or self.plot_size is None:
+            return fig
+        pw, ph = self.plot_size
+        m = fig.layout.margin
+
+        def mv(val, default):
+            return default if val is None else val
+
+        if pw is not None:
+            fig.update_layout(width=pw + mv(m.l, 80) + mv(m.r, 80))
+        if ph is not None:
+            fig.update_layout(height=ph + mv(m.t, 100) + mv(m.b, 80))
+        return fig
+
+    def _apply_footer(self, fig, footer):
+        """Add a bottom text box (footer/caption) and reserve room for it below
+        the x-axis labels. No-op when ``footer`` is falsy, so the default
+        behavior (no footer) is unchanged. Uses ``self.footer_size`` if set.
+
+        The footer is an annotation in paper coords with a negative ``y`` (i.e.
+        in the bottom margin). Its position is computed against the *final* plot
+        area height, including the ``set_plot_size`` height pin which is applied
+        right after this in ``_finalize``."""
+        if fig is None or not footer:
+            return fig
+        text = footer.replace('\n', '<br>')
+        m = fig.layout.margin
+        band = _bottom_space(text, self.footer_size)
+        base_b = m.b if m.b is not None else 80
+        new_b = base_b + band
+        fig.update_layout(margin=dict(b=new_b))
+
+        # Plot-area height in px (one paper-y unit). If the height is pinned via
+        # set_plot_size, that is the final inner height; otherwise derive it.
+        if self.plot_size is not None and self.plot_size[1] is not None:
+            plot_h = self.plot_size[1]
+        else:
+            t = m.t if m.t is not None else 100
+            plot_h = max(1.0, (fig.layout.height or 800) - t - new_b)
+
+        # Sit the footer's bottom edge _FOOTER_PAD px above the figure's bottom,
+        # below the axis labels (which occupy base_b); extra lines grow upward.
+        y = -(new_b - _FOOTER_PAD) / plot_h
+        ann = dict(text=text, showarrow=False, align='center',
+                   x=0.5, xref='paper', xanchor='center',
+                   y=y, yref='paper', yanchor='bottom')
+        if self.footer_size is not None:
+            ann['font'] = dict(size=self.footer_size)
+        fig.add_annotation(**ann)
+        return fig
 
     def _apply_fonts(self, fig):
         """Apply stored font sizes to a Plotly figure."""
@@ -4023,6 +4318,21 @@ class UnichartNotebook:
             layout_updates['hoverlabel'] = dict(font=dict(size=self.hover_size))
         if layout_updates:
             fig.update_layout(**layout_updates)
+
+        # With the (possibly larger) custom title font now applied, re-reserve
+        # the top space so a bigger suptitle can't collide with an above-legend.
+        # _base_layout sized it for the default font; redo it for the real size.
+        if self.suptitle_size is not None and fig.layout.title.text:
+            height = fig.layout.height or 800
+            leg = fig.layout.legend
+            has_above = (leg.orientation == 'h' and leg.yref == 'container')
+            top_margin, title_pos, legend_pos = _top_space(
+                fig.layout.title.text, (None, height / 100), has_above,
+                title_font_size=self.suptitle_size)
+            geo = {'margin': dict(t=top_margin), 'title': dict(y=title_pos['y'])}
+            if legend_pos is not None:
+                geo['legend'] = dict(y=legend_pos['y'])
+            fig.update_layout(**geo)
 
         sp_size = getattr(self, 'subplot_title_size', None)
         if sp_size is not None and fig.layout.annotations:
@@ -4055,15 +4365,22 @@ class UnichartNotebook:
 
         return fig
 
-    def _finalize(self, fig, suppress_legends):
-        """Shared tail for every plotting method: apply font sizes, optionally
-        collapse traces to legend-only, and cache the figure as ``last_fig``.
+    def _finalize(self, fig, suppress_legends, footer=None):
+        """Shared tail for every plotting method: apply font sizes, add the
+        optional footer, optionally collapse traces to legend-only, and cache the
+        figure as ``last_fig``.
 
         This is the one step a new plotting method must not forget — keeping the
         ``self.last_fig`` cache contract in a single place. Grid sizing, decorations,
         and axis-limit ranges stay in each method, since those differ per plot type.
+
+        ``footer`` is added after ``_apply_fonts`` (so the subplot-title font loop
+        doesn't resize it) and before ``_enforce_plot_size`` (so the reserved
+        bottom margin is included when pinning the plot area).
         """
         fig = self._apply_fonts(fig)
+        fig = self._apply_footer(fig, footer)
+        fig = self._enforce_plot_size(fig)
         if fig is not None and suppress_legends:
             fig.update_traces(visible='legendonly')
         self.last_fig = fig
@@ -4072,8 +4389,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Main Plot Function
     # ------------------------------------------------------------------
-    def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None, 
-                subplot_titles=None, suptitle=None, suppress_legends=False, **kwargs):
+    def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None,
+                subplot_titles=None, suptitle=None, footer=None, suppress_legends=False, **kwargs):
         """
         Main plotting wrapper.
 
@@ -4173,17 +4490,14 @@ class UnichartNotebook:
                 if yi in self.axis_limits:
                     fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-        fig.update_layout(
-            legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                        xanchor="left", x=0),
-            margin=dict(r=80),
-        )
-        return self._finalize(fig, suppress_legends)
+        _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
+        fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+        return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
     # ------------------------------------------------------------------
     # Multi-Y plot wrapper
     # ------------------------------------------------------------------
-    def plot_ymult(self, x=None, y=None, suptitle=None, figsize=(12, 8),
+    def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=(12, 8),
                      legend='above', legend_group_by='sets', suppress_legends=False):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
@@ -4248,13 +4562,13 @@ class UnichartNotebook:
                                   fillcolor=h['color'], opacity=h['alpha'],
                                   layer='below', line_width=0)
 
-        return self._finalize(fig, suppress_legends)
+        return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
     def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
-            color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+            color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
 
@@ -4285,7 +4599,7 @@ class UnichartNotebook:
             )
             if fig:
                 fig = self._apply_decorations(fig, [], y_list, 'global', 1)
-                fig = self._finalize(fig, suppress_legends)
+                fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
             return fig
 
         elif by in ['sets', 'datasets']:
@@ -4328,15 +4642,15 @@ class UnichartNotebook:
             dec_items = [(x, yi) for yi in y_list] if dec_mode == 'vars' else None
             fig = self._apply_decorations(fig, [], y_list, dec_mode, calc_ncols, dec_items)
 
-            fig = self._finalize(fig, suppress_legends)
+            fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
         return fig
 
     # ------------------------------------------------------------------
     # The box Command
     # ------------------------------------------------------------------
-    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False, 
-                color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False,
+                color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Box Plots.
         """
@@ -4357,12 +4671,9 @@ class UnichartNotebook:
             )
             if fig:
                 fig = self._apply_decorations(fig, [], y_list, 'global', 1)
-                fig.update_layout(
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                xanchor="left", x=0),
-                    margin=dict(r=80),
-                )
-                fig = self._finalize(fig, suppress_legends)
+                _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
+                fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+                fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
             return fig
 
         elif by in ['sets', 'datasets']:
@@ -4400,12 +4711,9 @@ class UnichartNotebook:
                 _nc = max(1, _calc_grid(len(y_list), nrows, ncols)[1])
                 fig = self._apply_decorations(fig, [], y_list, 'vars', _nc,
                                               [(x, yi) for yi in y_list])
-            fig.update_layout(
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            xanchor="left", x=0),
-                margin=dict(r=80),
-            )
-            fig = self._finalize(fig, suppress_legends)
+            _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
+            fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+            fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
         return fig
 
@@ -4415,7 +4723,7 @@ class UnichartNotebook:
     def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
                     histnorm='', barmode='overlay', alpha=0.7,
-                    color=None, suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False,
+                    color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False,
                     opacity=None):
         """
         Unified interface for Histograms.
@@ -4460,7 +4768,7 @@ class UnichartNotebook:
                 fig = self._apply_decorations(fig, x_list, [], 'vars', _nc,
                                               [(xi, None) for xi in x_list])
 
-        return self._finalize(fig, suppress_legends)
+        return self._finalize(fig, suppress_legends, footer=footer or self.footer)
         
     # ------------------------------------------------------------------
     # The contour Command
@@ -4468,7 +4776,7 @@ class UnichartNotebook:
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill',
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     ncontours=None, overlay_sets=None,
-                    suptitle=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                    suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Contour Plots.
 
@@ -4528,7 +4836,7 @@ class UnichartNotebook:
                                               [(x, y) for _ in z_list])
             if limit_x: fig.update_xaxes(range=limit_x)
             if limit_y: fig.update_yaxes(range=limit_y)
-            fig = self._finalize(fig, suppress_legends)
+            fig = self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
         return fig
 
