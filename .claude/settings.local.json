@@ -28,7 +28,8 @@
       "Bash(/usr/bin/git diff *)",
       "Bash(git --version)",
       "Bash(awk '/^    def [a-z]/{m=$0; ln=NR} /_finalize\\\\\\(/{print ln\": \"m\" -> _finalize@\"NR}' unichart.py)",
-      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/smoke_static.py)"
+      "Bash(PYTHONPATH=/home/tom/Documents/GitHub/toms_utils python3 /tmp/smoke_static.py)",
+      "Bash(PYTHONPATH=. python3 -c ' *)"
     ]
   }
 }
