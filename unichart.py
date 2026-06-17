@@ -4460,7 +4460,8 @@ class UnichartNotebook:
     # Main Plot Function
     # ------------------------------------------------------------------
     def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None,
-                subplot_titles=None, suptitle=None, footer=None, suppress_legends=False, **kwargs):
+                subplot_titles=None, suptitle=None, footer=None, suppress_legends=False,
+                legend='above', **kwargs):
         """
         Main plotting wrapper.
 
@@ -4470,11 +4471,16 @@ class UnichartNotebook:
             'vars'    (default) - Subplot per Y variable.
             'sets' / 'datasets' - Subplot per Dataset.
             'ymult'           - Single plot, multiple Y axes (delegates to plot_ymult).
+        legend : str, optional
+            Legend placement, matching ``plot_ymult``:
+            'above' (default) - horizontal legend above the plot.
+            'right'           - vertical legend to the right of the plot.
+            'off'             - hide the legend.
         """
         # Delegate to the multi-y wrapper if requested
         if by == 'ymult':
             return self.plot_ymult(x=x, y=y, suptitle=suptitle,
-                                     figsize=figsize,
+                                     figsize=figsize, legend=legend,
                                      suppress_legends=suppress_legends)
 
         self._clear_last_fig()
@@ -4560,8 +4566,19 @@ class UnichartNotebook:
                 if yi in self.axis_limits:
                     fig.update_yaxes(range=self.axis_limits[yi], row=r, col=c)
 
-        _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
-        fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
+        if legend == 'off':
+            fig.update_layout(showlegend=False)
+        elif legend == 'right':
+            _top, _, _ = _top_space(suptitle or self.suptitle, figsize, False)
+            fig.update_layout(
+                showlegend=True,
+                legend=dict(orientation='v', xanchor='left', x=1.02,
+                            yanchor='top', y=1),
+                margin=dict(r=160, t=_top),
+            )
+        else:  # 'above' (default)
+            _legend, _top = _above_legend_layout(suptitle or self.suptitle, figsize)
+            fig.update_layout(legend=_legend, margin=dict(r=80, t=_top))
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
 
     # ------------------------------------------------------------------
@@ -4633,6 +4650,19 @@ class UnichartNotebook:
                                   layer='below', line_width=0)
 
         return self._finalize(fig, suppress_legends, footer=footer or self.footer)
+
+    # ------------------------------------------------------------------
+    # Interactive Dash dashboard wrapper
+    # ------------------------------------------------------------------
+    def dashboard(self, panels, **kwargs):
+        """Launch an interactive Dash board combining multiple unichart figures.
+
+        Thin wrapper around :func:`unichart_dashboard.dashboard`; imported lazily
+        so the optional Dash dependency isn't required to use the rest of the
+        toolkit. See that function for ``panels`` and keyword options.
+        """
+        from unichart_dashboard import dashboard as _dashboard
+        return _dashboard(self, panels, **kwargs)
 
     # ------------------------------------------------------------------
     # The bar Command
