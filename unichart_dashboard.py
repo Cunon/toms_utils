@@ -63,7 +63,8 @@ def _selected_indices(nb):
     return [ds.index for ds in nb.sets if ds.select]
 
 
-def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above'):
+def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above',
+                 size=None):
     """Render one panel to a ``go.Figure`` using the notebook's plot methods.
 
     Temporarily sets dataset selection to ``dataset_indices``, dispatches to
@@ -73,10 +74,16 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
     selection is restored and an empty figure carrying the error text is returned
     so one bad panel can't take down the board.
 
+    ``size`` is an optional ``(width_px, height_px)``. When given, it is stamped
+    onto the figure as an explicit, non-autosize dimension. This matters for the
+    inline-Jupyter board: a freshly-created Dash iframe has zero size at first
+    paint, so an autosize/responsive figure draws a 0x0 (blank) canvas until an
+    interaction triggers a resize. An explicit size paints correctly on load.
+
     This is the pure core of the Dash callback and is callable directly in tests.
     """
     if method not in PLOT_METHODS:
-        return _error_figure(f"Unknown plot method: {method!r}")
+        return _size(_error_figure(f"Unknown plot method: {method!r}"), size)
 
     chosen = set(dataset_indices or [])
 
@@ -85,6 +92,12 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
         try:
             for ds in nb.sets:
                 ds.select = ds.index in chosen
+
+            # The y control is multi-select (a list), but some methods (e.g.
+            # histogram) require a scalar y. Unwrap a single selection so every
+            # method works; keep the list only when genuinely multi-valued.
+            if isinstance(y, (list, tuple)) and len(y) == 1:
+                y = y[0]
 
             kwargs = {'x': x, 'y': y}
             if suptitle:
@@ -95,16 +108,26 @@ def render_panel(nb, method, x, y, dataset_indices, suptitle=None, legend='above
             getattr(nb, method)(**kwargs)
             fig = nb.last_fig
             if fig is None:
-                return _error_figure("No figure produced (no data / selection?)")
-            # unichart bakes figsize into width/height (see _base_layout); drop it
-            # so each figure flexes to fill its grid cell instead of overflowing.
-            fig.update_layout(autosize=True, width=None, height=None)
-            return fig
+                return _size(_error_figure("No figure produced (no data / selection?)"), size)
+            # nb caches this figure and later GUTS it in place (data=[], layout={})
+            # via _clear_last_fig on the next plot. Return an independent copy so a
+            # panel survives subsequent renders of other panels.
+            return _size(go.Figure(fig), size)
         except Exception as exc:  # noqa: BLE001 - surface any plotting error in-panel
-            return _error_figure(f"{type(exc).__name__}: {exc}")
+            return _size(_error_figure(f"{type(exc).__name__}: {exc}"), size)
         finally:
             for ds, was in snapshot:
                 ds.select = was
+
+
+def _size(fig, size):
+    """Stamp an explicit (width, height) onto a figure so it paints at a known
+    size regardless of its container. unichart bakes figsize into width/height
+    via _base_layout; we overwrite it with the panel size. With ``size=None`` the
+    figure keeps whatever dimensions it already has."""
+    if size is not None:
+        fig.update_layout(autosize=False, width=size[0], height=size[1])
+    return fig
 
 
 def _error_figure(message):
@@ -127,12 +150,16 @@ def _normalize_y(y):
     return [str(y)]
 
 
-def build_app(nb, panels, ncols=2, height=420):
+def build_app(nb, panels, ncols=2, width=600, height=420):
     """Build (but do not run) the Dash app for the given panels.
 
     Returns the configured ``dash.Dash`` instance with its layout and the single
     pattern-matching callback registered. Factored out of :func:`dashboard` so
     the app/layout can be constructed and inspected without starting a server.
+
+    ``width`` / ``height`` are the explicit px size of each panel's figure. They
+    are stamped onto every figure so panels paint reliably inline (see
+    :func:`render_panel`) instead of collapsing to 0x0 in a fresh Dash iframe.
     """
     Dash, dcc, html, Input, Output, MATCH = _require_dash()
 
@@ -145,14 +172,15 @@ def build_app(nb, panels, ncols=2, height=420):
     dataset_options = [{'label': ds.title_format, 'value': ds.index}
                        for ds in nb.sets]
     default_selected = _selected_indices(nb)
+    size = (width, height)
 
     app = Dash(__name__)
     app.layout = html.Div(
         [_panel_div(html, dcc, i, panel, col_options, dataset_options,
-                    default_selected, height, nb)
+                    default_selected, size, nb)
          for i, panel in enumerate(panels)],
         style={'display': 'grid',
-               'gridTemplateColumns': f'repeat({ncols}, 1fr)',
+               'gridTemplateColumns': f'repeat({ncols}, max-content)',
                'gap': '16px', 'padding': '8px'},
     )
 
@@ -164,10 +192,13 @@ def build_app(nb, panels, ncols=2, height=420):
         Input({'type': 'panel-datasets', 'index': MATCH}, 'value'),
         Input({'type': 'panel-suptitle', 'index': MATCH}, 'value'),
         Input({'type': 'panel-legend', 'index': MATCH}, 'value'),
-        prevent_initial_call=True,  # initial figures are baked into each Graph
+        # Left as initial-call-enabled on purpose: on load the callback repaints
+        # every panel via the same path used on interaction (the one confirmed to
+        # render in the browser). The baked figures are an immediate fallback; the
+        # one extra render per panel on load is negligible for this data.
     )
     def _update_panel(method, x, y, datasets, suptitle, legend):
-        return render_panel(nb, method, x, y, datasets, suptitle, legend)
+        return render_panel(nb, method, x, y, datasets, suptitle, legend, size=size)
 
     return app
 
@@ -181,8 +212,9 @@ def _control(html, label, component):
 
 
 def _panel_div(html, dcc, i, panel, col_options, dataset_options,
-               default_selected, height, nb):
+               default_selected, size, nb):
     """One panel: a row of controls above its graph."""
+    width, height = size
     method = panel.get('method', 'plot')
     x = panel.get('x')
     y = _normalize_y(panel.get('y'))
@@ -217,17 +249,17 @@ def _panel_div(html, dcc, i, panel, col_options, dataset_options,
                'alignItems': 'flex-start', 'marginBottom': '6px'},
     )
 
-    initial = render_panel(nb, method, x, y, selected, suptitle, legend)
+    initial = render_panel(nb, method, x, y, selected, suptitle, legend, size=size)
     graph = dcc.Graph(id={'type': 'panel-graph', 'index': i},
-                      figure=initial, responsive=True,
-                      style={'height': f'{height}px', 'width': '100%'})
+                      figure=initial,
+                      style={'height': f'{height}px', 'width': f'{width}px'})
 
     return html.Div([controls, graph],
                     style={'border': '1px solid #ddd', 'borderRadius': '6px',
                            'padding': '8px'})
 
 
-def dashboard(nb, panels, ncols=2, height=420, jupyter_mode='inline',
+def dashboard(nb, panels, ncols=2, width=600, height=420, jupyter_mode='inline',
               port=8050, debug=False, **run_kwargs):
     """Build and launch an interactive Dash board combining unichart figures.
 
@@ -243,8 +275,9 @@ def dashboard(nb, panels, ncols=2, height=420, jupyter_mode='inline',
         current selection).
     ncols : int
         Number of columns in the panel grid.
-    height : int
-        Height in px of each panel's graph.
+    width, height : int
+        Explicit px size of each panel's figure. An explicit size is what makes
+        panels paint reliably in the inline Jupyter iframe.
     jupyter_mode : str
         Passed to ``Dash.run`` — ``'inline'`` (default) renders in the notebook
         cell; ``'external'`` / ``'tab'`` open a browser.
@@ -256,6 +289,11 @@ def dashboard(nb, panels, ncols=2, height=420, jupyter_mode='inline',
     dash.Dash
         The running app instance (useful for inspection / further wiring).
     """
-    app = build_app(nb, panels, ncols=ncols, height=height)
+    app = build_app(nb, panels, ncols=ncols, width=width, height=height)
+    # The inline iframe defaults to ~650px and would clip a multi-row board, so
+    # size it to fit all rows (caller can override via jupyter_height=...).
+    if jupyter_mode == 'inline' and 'jupyter_height' not in run_kwargs:
+        nrows = -(-len(panels) // ncols)          # ceil division
+        run_kwargs['jupyter_height'] = nrows * (height + 150) + 40
     app.run(jupyter_mode=jupyter_mode, port=port, debug=debug, **run_kwargs)
     return app
