@@ -279,12 +279,25 @@ def _subplot_refs(row, col, ncols):
 # -----------------------------------------------------------------------------
 _VAR_FORMAT_KEYS = ('color', 'marker', 'linestyle', 'markersize', 'linewidth', 'alpha')
 
+# Sentinel for ``default_format['marker']`` meaning "assign per-index from
+# marker_map" (the historical behavior). A concrete marker string instead pins
+# every future dataset to that symbol, and ``None`` turns markers off — distinct
+# from "use the index map", which is why this needs its own sentinel object.
+_MARKER_BY_INDEX = object()
+
+# Sentinel for set_default_format's ``marker`` parameter meaning "not supplied,
+# leave unchanged". Kept separate from _MARKER_BY_INDEX so that an explicit
+# ``marker=None`` (markers off) is distinguishable from "caller passed nothing".
+_UNSET = object()
+
 # Built-in per-dataset style defaults applied to newly loaded sets. Each
 # UnichartNotebook copies these into ``self.default_format``; ``set_default_format``
 # overrides them so that *future* loaded datasets (and ``reset_format``) pick up
 # the new styling — the markersize/linewidth analogue of color_map/marker_map.
-# Color and marker are excluded: those are assigned by index via color_map/marker_map.
+# ``marker`` defaults to _MARKER_BY_INDEX (per-index from marker_map); setting it
+# to a symbol or to None overrides that for future sets. Color stays index-only.
 _DATASET_FORMAT_DEFAULTS = {
+    'marker':     _MARKER_BY_INDEX,
     'markersize': 10,
     'linestyle':  None,
     'linewidth':  2,
@@ -493,11 +506,15 @@ class Dataset:
         self.title_format = f"{self.title} {index}"
 
         self._color = notebook._color_at(index)
-        self._marker = notebook._marker_at(index)
 
         # Per-dataset style defaults come from the notebook so set_default_format
         # controls how future loaded datasets look. Falls back to the built-ins.
         fmt = getattr(notebook, 'default_format', _DATASET_FORMAT_DEFAULTS)
+        # Marker is per-index by default; a default marker (symbol or None=off)
+        # set via set_default_format overrides the marker_map assignment.
+        default_marker = fmt.get('marker', _MARKER_BY_INDEX)
+        self._marker = (notebook._marker_at(index)
+                        if default_marker is _MARKER_BY_INDEX else default_marker)
         self._edge_color = fmt.get('edge_color', 'black')
         self._fill = fmt.get('fill', True)
         self._linestyle = fmt.get('linestyle', None)
@@ -514,7 +531,7 @@ class Dataset:
         self.data_type = 'discrete'
         self.delta_sets = None
         self.file_path = None
-        self._display_parms = display_parms if display_parms else []
+        self._display_parms = coerce_display_parms(display_parms)
         self._plot_type = 'scatter'
         self._order = None
 
@@ -744,10 +761,7 @@ class Dataset:
 
     @display_parms.setter
     def display_parms(self, value):
-        if isinstance(value, list):
-            self._display_parms = value
-        else:
-            raise ValueError(f"display_parms must be a list")
+        self._display_parms = coerce_display_parms(value)
 
     def sel_query(self, query):
         self.query = query
@@ -793,6 +807,91 @@ class Dataset:
 # -----------------------------------------------------------------------------
 # Helper Functions
 # -----------------------------------------------------------------------------
+
+def coerce_display_parms(value):
+    """Normalise a ``display_parms`` value into a clean list of column names.
+
+    Accepts ``None`` (-> ``[]``), a single string (-> ``[name]``), or any
+    iterable of names (list, tuple, pandas.Index, numpy array, ...). Entries
+    are stringified, stripped of blanks, and de-duplicated while preserving
+    order. A non-iterable, non-string value raises ``ValueError`` so genuine
+    mistakes still surface.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, dict):
+        raise ValueError("display_parms must be a column name or list of names, not a dict")
+    elif hasattr(value, '__iter__'):
+        items = list(value)
+    else:
+        raise ValueError(f"display_parms must be a column name or list of names, got {type(value).__name__}")
+    out = []
+    for item in items:
+        name = str(item).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def build_hover_data(df, parms):
+    """Build robust hover ``customdata`` + template lines for ``display_parms``.
+
+    Returns ``(customdata, lines)`` where ``customdata`` is an ndarray suitable
+    for a trace's ``customdata`` (or ``None`` when there is nothing to show) and
+    ``lines`` is a list of ``"<br>name: %{customdata[i]...}"`` template
+    fragments to append to a hovertemplate.
+
+    Each parm is formatted by dtype so that "certain data" renders cleanly:
+
+    * datetimes are pre-rendered to readable strings (never raw epoch ints or
+      ``...T00:00:00`` ISO blobs, and ``NaT`` shows blank);
+    * booleans show ``True`` / ``False`` rather than ``1`` / ``0``;
+    * integers print in full, without scientific notation;
+    * floats use general precision (``.6g``);
+    * anything else (categories, strings, objects) is shown as-is;
+    * missing values render blank instead of ``NaN`` / ``None``.
+
+    Parms missing from ``df`` are skipped. Building each column independently
+    also avoids the mixed-dtype ``to_numpy()`` collapse that previously turned
+    timestamps into opaque objects.
+    """
+    cols = []
+    lines = []
+    for parm in parms:
+        if parm not in df.columns:
+            continue
+        s = df[parm]
+        i = len(cols)
+        if pd.api.types.is_datetime64_any_dtype(s):
+            # any non-midnight time component -> include H:M:S. The notna mask
+            # is required because NaT != NaT is True in pandas.
+            has_time = bool((s.notna() & (s != s.dt.normalize())).any())
+            fmt = '%Y-%m-%d %H:%M:%S' if has_time else '%Y-%m-%d'
+            col = s.dt.strftime(fmt).where(s.notna(), '')
+            cols.append(col.to_numpy())
+            lines.append(f"<br>{parm}: %{{customdata[{i}]}}")
+        elif pd.api.types.is_bool_dtype(s):
+            col = np.where(s.to_numpy(), 'True', 'False')
+            cols.append(col)
+            lines.append(f"<br>{parm}: %{{customdata[{i}]}}")
+        elif pd.api.types.is_integer_dtype(s):
+            cols.append(s.to_numpy())
+            # plain %{customdata} prints integers in full (no .5g sci notation)
+            lines.append(f"<br>{parm}: %{{customdata[{i}]}}")
+        elif pd.api.types.is_numeric_dtype(s):
+            cols.append(s.to_numpy())
+            lines.append(f"<br>{parm}: %{{customdata[{i}]:.6g}}")
+        else:
+            col = s.astype(object).where(s.notna(), '')
+            cols.append(col.to_numpy())
+            lines.append(f"<br>{parm}: %{{customdata[{i}]}}")
+    if not cols:
+        return None, []
+    customdata = np.column_stack(cols) if len(cols) > 1 else cols[0].reshape(-1, 1)
+    return customdata, lines
+
 
 def table_read(df, x_col, y_col, x_in, kind='linear', fill_value='extrapolate', bounds_error=False):
     """Interpolate values from a DataFrame column using 1-D interpolation.
@@ -1101,19 +1200,22 @@ def uniplot(list_of_datasets, x, y, z=None, plot_type=None, color=None, hue=None
             # x/y are already serialized as the trace's own arrays, so only the
             # hover parms ride in customdata (as a plain ndarray, not a frame) —
             # shipping x/y there as well doubled the figure payload.
-            custom_data = df[valid_hover].to_numpy() if valid_hover else None
+            custom_data, hover_lines = build_hover_data(df, valid_hover)
 
             ht = f"<b><u>Set: {cur_idx}</u></b><br><b>{cur_title}</b><br>{x_col}: %{{x:.2f}}<br>{yi}: %{{y:.2f}}"
-            for cd_i, parm in enumerate(valid_hover):
-                if pd.api.types.is_numeric_dtype(df[parm]): ht += f"<br>{parm}: %{{customdata[{cd_i}]:.5g}}"
-                else: ht += f"<br>{parm}: %{{customdata[{cd_i}]}}"
+            ht += "".join(hover_lines)
             ht += "<extra></extra>"
 
+            # A line shows when a linestyle is set (regression draws its own
+            # trace, so the raw series stays point-only). Markers show unless
+            # explicitly turned off with marker=None; if neither is on, the
+            # trace draws nothing ('none').
+            show_line = bool(cur_linestyle) and not cur_reg_order
+            show_marker = cur_marker is not None
             mode_parts = []
-            if not cur_linestyle or cur_reg_order: mode_parts.append('markers')
-            else: mode_parts.append('lines')
-            if cur_marker: mode_parts.append('markers')
-            mode = "+".join(mode_parts)
+            if show_line: mode_parts.append('lines')
+            if show_marker: mode_parts.append('markers')
+            mode = "+".join(mode_parts) if mode_parts else 'none'
 
             marker_dict = dict(
                 size=cur_markersize, symbol=get_plotly_marker(cur_marker),
@@ -1268,12 +1370,13 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
         if dataset.linestyle:
             line_dict['dash'] = get_plotly_linestyle(dataset.linestyle)
 
-        hover_cd = df[valid_hover].to_numpy() if valid_hover else None
+        hover_cd, hover_lines = build_hover_data(df, valid_hover)
+        hover_suffix = "".join(hover_lines)
 
         if primary_y in df.columns:
             color0 = color_cycle[0]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
-                  f"<br>{primary_y}: %{{y:.2f}}<extra></extra>")
+                  f"<br>{primary_y}: %{{y:.2f}}{hover_suffix}<extra></extra>")
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[primary_y],
@@ -1304,7 +1407,7 @@ def uniplot_per_dataset(list_of_datasets, x, y, display_parms=None,
                 continue
             color_k = color_cycle[(k + 1) % len(color_cycle)]
             ht = (f"<b>{dataset.title}</b><br>{x_col}: %{{x:.2f}}"
-                  f"<br>{yi}: %{{y:.2f}}<extra></extra>")
+                  f"<br>{yi}: %{{y:.2f}}{hover_suffix}<extra></extra>")
             fig.add_trace(
                 _scatter_cls(len(df))(
                     x=df[x_col], y=df[yi],
@@ -1806,10 +1909,10 @@ def _add_contour_overlays(fig, overlay_datasets, x, y, n_subplots, ncols, darkmo
             df = df.sort_values(by=ds.order)
 
         # A linestyle means "draw a line" (trace a boundary); markers show
-        # unless the set is line-only.
+        # unless turned off with marker=None.
         want_lines = bool(ds.linestyle)
-        want_markers = bool(ds.marker) or not want_lines
-        mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers)
+        want_markers = ds.marker is not None
+        mode = '+'.join(['lines'] * want_lines + ['markers'] * want_markers) or 'none'
 
         marker_dict = dict(
             symbol=get_plotly_marker(ds.marker),
@@ -2317,22 +2420,16 @@ def uniplot_ymultaxis(list_of_datasets, x, y,
             parts = []
             if fmt['linestyle']:
                 parts.append('lines')
-            if fmt['marker'] or not fmt['linestyle']:
+            if fmt['marker'] is not None:   # marker=None turns markers off
                 parts.append('markers')
-            mode = '+'.join(parts) if parts else 'markers'
+            mode = '+'.join(parts) if parts else 'none'
 
             ht = (f"<b>Set {ds.index}: {ds.title}</b><br>"
                   f"<b>{yi}</b><br>"
                   f"{x}: %{{x:.4g}}<br>"
                   f"{yi}: %{{y:.4g}}")
-            customdata = None
-            if valid_hover:
-                customdata = df[valid_hover].to_numpy()
-                for i, p in enumerate(valid_hover):
-                    if pd.api.types.is_numeric_dtype(df[p]):
-                        ht += f"<br>{p}: %{{customdata[{i}]:.4g}}"
-                    else:
-                        ht += f"<br>{p}: %{{customdata[{i}]}}"
+            customdata, hover_lines = build_hover_data(df, valid_hover)
+            ht += "".join(hover_lines)
             ht += "<extra></extra>"
 
             y_axis_name = "y" if idx_y == 0 else f"y{idx_y + 1}"
@@ -2452,6 +2549,12 @@ class UnichartNotebook:
         # None = current behavior (no footer, no extra bottom margin reserved).
         self.footer = None
 
+        # Default figure size (width, height) in inches, used by the plot methods
+        # whenever a call doesn't pass figsize=. Change via set_default_format.
+        # Distinct from set_plot_size, which pins the inner plot area; figsize
+        # sets the overall figure dimensions.
+        self.figsize = (12, 8)
+
         # Plot Decorations
         self.plot_title = None
         self.x_label = None
@@ -2482,10 +2585,11 @@ class UnichartNotebook:
         # use. Integer indexing cycles, so nb.marker_map[3] works on a 2-marker map.
         self.marker_map = list(MARKER_MAP_MPL_TO_PLOTLY.keys())
 
-        # Per-dataset style defaults (markersize/linestyle/linewidth/edgewidth/
-        # edge_color/alpha/fill) applied to datasets as they're loaded. Change
-        # via set_default_format to restyle *future* loaded datasets; color and
-        # marker stay controlled by color_map/marker_map.
+        # Per-dataset style defaults (marker/markersize/linestyle/linewidth/
+        # edgewidth/edge_color/alpha/fill) applied to datasets as they're loaded.
+        # Change via set_default_format to restyle *future* loaded datasets; color
+        # stays controlled by color_map. Marker defaults to per-index (marker_map)
+        # but set_default_format can pin it to a symbol or disable it (None).
         self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
 
         # Optional fixed inner plot-area size (px, w/h, either may be None) so
@@ -3379,9 +3483,11 @@ class UnichartNotebook:
             targets = (self.sets if uset_slice is None
                        else self._get_uset_slice(uset_slice))
             fmt = getattr(self, 'default_format', _DATASET_FORMAT_DEFAULTS)
+            default_marker = fmt.get('marker', _MARKER_BY_INDEX)
             for ds in targets:
                 ds._color      = self._color_at(ds.index)
-                ds._marker     = self._marker_at(ds.index)
+                ds._marker     = (self._marker_at(ds.index)
+                                  if default_marker is _MARKER_BY_INDEX else default_marker)
                 ds._linestyle  = fmt.get('linestyle', None)
                 ds.markersize  = fmt.get('markersize', 10)
                 ds.linewidth   = fmt.get('linewidth', 2)
@@ -3423,14 +3529,14 @@ class UnichartNotebook:
 
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           reset=False):
+                           marker=_UNSET, figsize=None, reset=False):
         """Set the per-dataset style defaults applied to *future* loaded datasets.
 
         The markersize/linewidth analogue of ``color_map``/``marker_map``: only
         the values you pass change, others persist. Already-loaded datasets keep
         their current styling — call ``reset_format()`` to re-apply the new
-        defaults to them. Color and marker remain controlled by ``color_map`` /
-        ``marker_map``. ``reset=True`` restores the built-in defaults.
+        defaults to them. Color remains controlled by ``color_map``.
+        ``reset=True`` restores the built-in defaults (but leaves ``figsize``).
 
         Parameters
         ----------
@@ -3439,13 +3545,36 @@ class UnichartNotebook:
         linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
         edge_color : color string (named, hex, or rgb)
         fill : bool (or truthy/falsy string) — filled vs. hollow markers
+        marker : marker symbol, None, or 'map'
+            A marker symbol pins every future dataset to that symbol; ``None``
+            turns markers off (a line-only plot shows just lines; with neither
+            line nor marker the trace draws nothing); ``'map'`` restores the
+            default per-index assignment from ``marker_map``.
+        figsize : (width, height) tuple of positive numbers (inches)
+            The default figure size used by the plot methods (plot, plot_ymult,
+            bar, box, histogram, contour) whenever a call doesn't pass its own
+            ``figsize=``. Figure-level, so unlike the other options here it is
+            not a per-dataset style and is unaffected by ``reset_format()``.
+            Distinct from ``set_plot_size``, which pins the inner plot area.
 
         Examples
         --------
         nb.set_default_format(markersize=6, linestyle='--', linewidth=1)
         nb.load_df(df, title='styled by the new defaults')
+        nb.set_default_format(marker=None)   # turn markers off for future sets
+        nb.set_default_format(marker='map')  # back to per-index markers
+        nb.set_default_format(figsize=(10, 6))  # default size for future plots
         nb.set_default_format(reset=True)
         """
+        if figsize is not None:
+            if (not isinstance(figsize, (tuple, list)) or len(figsize) != 2
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or v <= 0 for v in figsize)):
+                raise ValueError(
+                    f"figsize must be a (width, height) tuple of positive "
+                    f"numbers, got {figsize!r}")
+            self.figsize = tuple(figsize)
+
         if reset:
             self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
             print("Default dataset format reset to built-ins.")
@@ -3460,6 +3589,16 @@ class UnichartNotebook:
             return val
 
         updates = {}
+        if marker is not _UNSET:
+            if isinstance(marker, str) and marker.lower() == 'map':
+                updates['marker'] = _MARKER_BY_INDEX
+            elif validate_marker(marker):
+                updates['marker'] = marker
+            else:
+                valid = ', '.join(sorted(map(str, MARKER_MAP_MPL_TO_PLOTLY)))
+                raise ValueError(
+                    f"Invalid marker {marker!r}. Use None (off), 'map' "
+                    f"(per-index), or one of: {valid}")
         if markersize is not None: updates['markersize'] = _num('markersize', markersize)
         if linewidth  is not None: updates['linewidth']  = _num('linewidth', linewidth)
         if edgewidth  is not None: updates['edgewidth']  = _num('edgewidth', edgewidth)
@@ -4459,7 +4598,7 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Main Plot Function
     # ------------------------------------------------------------------
-    def plot(self, x=None, y=None, by='vars', figsize=(12, 8), ncols=None, nrows=None,
+    def plot(self, x=None, y=None, by='vars', figsize=None, ncols=None, nrows=None,
                 subplot_titles=None, suptitle=None, footer=None, suppress_legends=False,
                 legend='above', **kwargs):
         """
@@ -4477,6 +4616,8 @@ class UnichartNotebook:
             'right'           - vertical legend to the right of the plot.
             'off'             - hide the legend.
         """
+        if figsize is None: figsize = self.figsize
+
         # Delegate to the multi-y wrapper if requested
         if by == 'ymult':
             return self.plot_ymult(x=x, y=y, suptitle=suptitle,
@@ -4584,12 +4725,13 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # Multi-Y plot wrapper
     # ------------------------------------------------------------------
-    def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=(12, 8),
+    def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=None,
                      legend='above', legend_group_by='sets', suppress_legends=False):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
         Applies all notebook-level formatting: axis_limits, variable_formats, lines, highlights.
         """
+        if figsize is None: figsize = self.figsize
         self._clear_last_fig()
         if x is None: x = self.last_x
         if y is None: y = self.last_y
@@ -4668,7 +4810,7 @@ class UnichartNotebook:
     # The bar Command
     # ------------------------------------------------------------------
     def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
-            color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+            color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Bar Charts.
 
@@ -4680,6 +4822,7 @@ class UnichartNotebook:
             nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
             nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
         """
+        if figsize is None: figsize = self.figsize
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -4750,10 +4893,11 @@ class UnichartNotebook:
     # The box Command
     # ------------------------------------------------------------------
     def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False,
-                color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Box Plots.
         """
+        if figsize is None: figsize = self.figsize
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -4823,11 +4967,12 @@ class UnichartNotebook:
     def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
                     histnorm='', barmode='overlay', alpha=0.7,
-                    color=None, suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False,
+                    color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False,
                     opacity=None):
         """
         Unified interface for Histograms.
         """
+        if figsize is None: figsize = self.figsize
         if opacity is not None:
             warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
             alpha = opacity
@@ -4876,7 +5021,7 @@ class UnichartNotebook:
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill',
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     ncontours=None, overlay_sets=None,
-                    suptitle=None, footer=None, figsize=(12, 8), ncols=None, nrows=None, suppress_legends=False):
+                    suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
         """
         Unified interface for Contour Plots.
 
@@ -4889,6 +5034,7 @@ class UnichartNotebook:
         are drawn on every subplot (including ``by='sets'``, where each subplot
         is a different dataset). Defaults to ``None`` (no overlay).
         """
+        if figsize is None: figsize = self.figsize
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -5048,12 +5194,16 @@ class UnichartNotebook:
             display, keeping ordinary decimal notation (no scientific notation).
             Affects the rendered HTML table and Markdown output only; the
             ``output='df'`` DataFrame keeps its full-precision numeric values.
-        output : {None, 'df', 'md'}, optional
+        output : {None, 'df', 'md', 'fig'}, optional
             What to return:
 
             - ``None`` (default): render and display the styled HTML table.
             - ``'df'``: return the assembled :class:`pandas.DataFrame`.
             - ``'md'``: return a GitHub-flavored Markdown string.
+            - ``'fig'``: return the styled Plotly ``go.Figure`` (a ``go.Table``),
+              with ``sig_figs`` and dark-mode already applied. Useful for
+              embedding the table alongside other figures (e.g. in a dashboard
+              panel) without triggering the HTML display side effect.
 
         Interpolation mode details
         --------------------------
@@ -5100,8 +5250,8 @@ class UnichartNotebook:
             df = chart.table(cols='power', x_in=[10, 15, 20],
                              kind='poly2', output='df')
         """
-        if output is not None and output not in ('df', 'md'):
-            print(f"Unknown output mode '{output}'. Use None, 'df', or 'md'.")
+        if output is not None and output not in ('df', 'md', 'fig'):
+            print(f"Unknown output mode '{output}'. Use None, 'df', 'md', or 'fig'.")
             return
         if sig_figs is not None and (not isinstance(sig_figs, int) or
                                      isinstance(sig_figs, bool) or sig_figs < 1):
@@ -5321,6 +5471,9 @@ class UnichartNotebook:
 
         self.last_fig = fig
         fig = self._apply_fonts(fig)
+
+        if output == 'fig':
+            return fig
 
         display_df = final_df.copy()
         for col in display_df.columns:
