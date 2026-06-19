@@ -2555,6 +2555,17 @@ class UnichartNotebook:
         # sets the overall figure dimensions.
         self.figsize = (12, 8)
 
+        # Persistent per-call plotting defaults, set via set_default_format.
+        # None = unset, so the relevant plot method falls back to its own built-in
+        # (resolved through _apply_default). An explicit per-call argument always
+        # wins over the stored default. Cleared by set_default_format(reset=True).
+        self.plot_defaults = {
+            'legend': None, 'suppress_legends': None,
+            'ncols': None, 'nrows': None,
+            'barmode': None, 'agg': None, 'histfunc': None,
+            'histnorm': None, 'alpha': None, 'boxmode': None, 'points': None,
+        }
+
         # Plot Decorations
         self.plot_title = None
         self.x_label = None
@@ -3527,21 +3538,54 @@ class UnichartNotebook:
         if fonts:     parts.append("font sizes")
         print(f"Reset: {', '.join(parts) if parts else 'nothing'}.")
 
+    def _apply_default(self, key, value, builtin):
+        """Resolve a per-call plotting arg: an explicit ``value`` (not None) wins;
+        else the stored ``self.plot_defaults[key]`` if set; else the method's own
+        ``builtin``. Lets each method keep its native default while sharing one
+        notebook-level override (e.g. barmode's built-in differs per method)."""
+        if value is not None:
+            return value
+        stored = self.plot_defaults.get(key)
+        return stored if stored is not None else builtin
+
+    def _resolve_grid(self, ncols, nrows):
+        """Apply the standing ncols/nrows default only when neither was passed,
+        resolving them as a pair so a one-off ``ncols=`` doesn't pull the default
+        ``nrows``. Returns ``(ncols, nrows)``."""
+        if ncols is None and nrows is None:
+            dn, dr = self.plot_defaults.get('ncols'), self.plot_defaults.get('nrows')
+            if dn is not None or dr is not None:
+                return dn, dr
+        return ncols, nrows
+
     def set_default_format(self, markersize=None, linestyle=None, linewidth=None,
                            edgewidth=None, edge_color=None, alpha=None, fill=None,
-                           marker=_UNSET, figsize=None, reset=False):
-        """Set the per-dataset style defaults applied to *future* loaded datasets.
+                           marker=_UNSET, figsize=None, legend=None,
+                           suppress_legends=None, ncols=None, nrows=None,
+                           barmode=None, agg=None, histfunc=None, histnorm=None,
+                           boxmode=None, points=None, reset=False):
+        """Set notebook-wide defaults for styling and for the plot methods.
 
-        The markersize/linewidth analogue of ``color_map``/``marker_map``: only
-        the values you pass change, others persist. Already-loaded datasets keep
-        their current styling — call ``reset_format()`` to re-apply the new
-        defaults to them. Color remains controlled by ``color_map``.
-        ``reset=True`` restores the built-in defaults (but leaves ``figsize``).
+        Two kinds of default live here. **Per-dataset styles** (markersize,
+        linestyle, linewidth, edgewidth, edge_color, alpha, fill, marker) are the
+        markersize/linewidth analogue of ``color_map``/``marker_map``, applied to
+        *future* loaded datasets; already-loaded sets keep their styling until
+        ``reset_format()`` re-applies the new defaults. **Figure / per-call
+        defaults** (figsize, legend, suppress_legends, ncols, nrows, barmode, agg,
+        histfunc, histnorm, points, boxmode) seed the matching argument of the
+        plot methods whenever a call doesn't pass its own value; an explicit
+        per-call argument always wins. Only the values you pass change; others
+        persist. Color remains controlled by ``color_map``.
+
+        ``reset=True`` restores *all* of the above — per-dataset styles, figsize,
+        and the per-call defaults — to their built-ins, and ignores other args.
 
         Parameters
         ----------
         markersize, linewidth, edgewidth : float (>= 0)
         alpha : float in [0, 1]
+            Default opacity for per-dataset styles *and* the histogram bar
+            opacity default (the latter overridable per-call via ``histogram(alpha=)``).
         linestyle : matplotlib/Plotly dash name (e.g. '--', 'dash') or None
         edge_color : color string (named, hex, or rgb)
         fill : bool (or truthy/falsy string) — filled vs. hollow markers
@@ -3551,21 +3595,41 @@ class UnichartNotebook:
             line nor marker the trace draws nothing); ``'map'`` restores the
             default per-index assignment from ``marker_map``.
         figsize : (width, height) tuple of positive numbers (inches)
-            The default figure size used by the plot methods (plot, plot_ymult,
-            bar, box, histogram, contour) whenever a call doesn't pass its own
-            ``figsize=``. Figure-level, so unlike the other options here it is
-            not a per-dataset style and is unaffected by ``reset_format()``.
-            Distinct from ``set_plot_size``, which pins the inner plot area.
+            Default figure size for all plot methods. Distinct from
+            ``set_plot_size``, which pins the inner plot area.
+        legend : 'above' | 'right' | 'off'
+            Default legend placement for ``plot`` / ``plot_ymult`` (built-in 'above').
+        suppress_legends : bool
+            Default for all plot methods (built-in False).
+        ncols, nrows : positive int
+            Default subplot grid. Takes precedence over the sticky "remember the
+            last grid" memory in ``plot``, but an explicit per-call ncols/nrows
+            still wins. Resolved as a pair: setting one leaves the other auto.
+        barmode : 'group' | 'stack' | 'overlay' | 'relative'
+            Default bar mode for ``bar`` (built-in 'group') and ``histogram``
+            (built-in 'overlay'). Validated against the union of both; a value
+            valid for only one method errors when the other method runs.
+        agg : aggregation name for ``bar`` (built-in 'mean').
+        histfunc, histnorm : for ``histogram`` (built-ins 'sum', '').
+        boxmode, points : for ``box`` (built-ins 'group', 'outliers').
 
         Examples
         --------
         nb.set_default_format(markersize=6, linestyle='--', linewidth=1)
-        nb.load_df(df, title='styled by the new defaults')
         nb.set_default_format(marker=None)   # turn markers off for future sets
-        nb.set_default_format(marker='map')  # back to per-index markers
-        nb.set_default_format(figsize=(10, 6))  # default size for future plots
-        nb.set_default_format(reset=True)
+        nb.set_default_format(figsize=(10, 6), legend='right', ncols=2)
+        nb.set_default_format(reset=True)    # clear styles, figsize, and defaults
         """
+        if reset:
+            self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
+            self.figsize = (12, 8)
+            self.plot_defaults = {k: None for k in self.plot_defaults}
+            print("Default format, figsize, and plot defaults reset to built-ins.")
+            return
+
+        # Validate everything into locals first; commit only at the end so a bad
+        # arg can't leave the notebook in a half-updated state.
+        new_figsize = None
         if figsize is not None:
             if (not isinstance(figsize, (tuple, list)) or len(figsize) != 2
                     or any(isinstance(v, bool) or not isinstance(v, (int, float))
@@ -3573,12 +3637,7 @@ class UnichartNotebook:
                 raise ValueError(
                     f"figsize must be a (width, height) tuple of positive "
                     f"numbers, got {figsize!r}")
-            self.figsize = tuple(figsize)
-
-        if reset:
-            self.default_format = dict(_DATASET_FORMAT_DEFAULTS)
-            print("Default dataset format reset to built-ins.")
-            return
+            new_figsize = tuple(figsize)
 
         def _num(name, val, lo=0.0, hi=None):
             if isinstance(val, bool) or not isinstance(val, (int, float)):
@@ -3622,7 +3681,43 @@ class UnichartNotebook:
             else:
                 raise ValueError(f"Invalid value for fill: {fill}")
 
+        # ---- Figure / per-call plotting defaults ---------------------------
+        pd_updates = {}
+        if 'alpha' in updates:
+            pd_updates['alpha'] = updates['alpha']  # also seeds histogram opacity
+        if legend is not None:
+            if legend not in ('above', 'right', 'off'):
+                raise ValueError(
+                    f"legend must be 'above', 'right', or 'off', got {legend!r}")
+            pd_updates['legend'] = legend
+        if suppress_legends is not None:
+            if not isinstance(suppress_legends, bool):
+                raise TypeError("suppress_legends must be bool, got "
+                                f"{type(suppress_legends).__name__}")
+            pd_updates['suppress_legends'] = suppress_legends
+        for _name, _val in (('ncols', ncols), ('nrows', nrows)):
+            if _val is not None:
+                if isinstance(_val, bool) or not isinstance(_val, int) or _val < 1:
+                    raise ValueError(f"{_name} must be a positive integer, got {_val!r}")
+                pd_updates[_name] = _val
+        if barmode is not None:
+            valid = ('group', 'stack', 'overlay', 'relative')
+            if barmode not in valid:
+                raise ValueError(f"barmode must be one of {valid}, got {barmode!r}")
+            pd_updates['barmode'] = barmode
+        # Chart-mode defaults validated leniently — Plotly/pandas reject bad values
+        # at draw time, so we don't track their allowed-value lists here.
+        if agg      is not None: pd_updates['agg']      = agg
+        if histfunc is not None: pd_updates['histfunc'] = histfunc
+        if histnorm is not None: pd_updates['histnorm'] = histnorm
+        if boxmode  is not None: pd_updates['boxmode']  = boxmode
+        if points   is not None: pd_updates['points']   = points
+
+        # All validation passed — commit.
+        if new_figsize is not None:
+            self.figsize = new_figsize
         self.default_format.update(updates)
+        self.plot_defaults.update(pd_updates)
 
     def reg_info(self, uset_slice=None):
         """Print the regression type, equation, and fit stats (R², RMSE, MAE) for each dataset."""
@@ -4599,8 +4694,8 @@ class UnichartNotebook:
     # Main Plot Function
     # ------------------------------------------------------------------
     def plot(self, x=None, y=None, by='vars', figsize=None, ncols=None, nrows=None,
-                subplot_titles=None, suptitle=None, footer=None, suppress_legends=False,
-                legend='above', **kwargs):
+                subplot_titles=None, suptitle=None, footer=None, suppress_legends=None,
+                legend=None, **kwargs):
         """
         Main plotting wrapper.
 
@@ -4611,12 +4706,15 @@ class UnichartNotebook:
             'sets' / 'datasets' - Subplot per Dataset.
             'ymult'           - Single plot, multiple Y axes (delegates to plot_ymult).
         legend : str, optional
-            Legend placement, matching ``plot_ymult``:
-            'above' (default) - horizontal legend above the plot.
-            'right'           - vertical legend to the right of the plot.
-            'off'             - hide the legend.
+            Legend placement, matching ``plot_ymult`` (default 'above', or the
+            ``set_default_format(legend=)`` default):
+            'above' - horizontal legend above the plot.
+            'right' - vertical legend to the right of the plot.
+            'off'   - hide the legend.
         """
         if figsize is None: figsize = self.figsize
+        legend = self._apply_default('legend', legend, 'above')
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
 
         # Delegate to the multi-y wrapper if requested
         if by == 'ymult':
@@ -4631,9 +4729,11 @@ class UnichartNotebook:
         self.last_x = x
         self.last_y = y
 
-        if ncols is None and nrows is None:
-            if self.last_ncols is not None or self.last_nrows is not None:
-                ncols, nrows = self.last_ncols, self.last_nrows
+        # Grid precedence: explicit call arg > standing default > sticky last grid
+        ncols, nrows = self._resolve_grid(ncols, nrows)
+        if ncols is None and nrows is None and (
+                self.last_ncols is not None or self.last_nrows is not None):
+            ncols, nrows = self.last_ncols, self.last_nrows
         self.last_ncols = ncols
         self.last_nrows = nrows
 
@@ -4726,12 +4826,17 @@ class UnichartNotebook:
     # Multi-Y plot wrapper
     # ------------------------------------------------------------------
     def plot_ymult(self, x=None, y=None, suptitle=None, footer=None, figsize=None,
-                     legend='above', legend_group_by='sets', suppress_legends=False):
+                     legend=None, legend_group_by='sets', suppress_legends=None):
         """
         Single plot, multiple Y-axes. All selected datasets overlay on the same x-axis.
         Applies all notebook-level formatting: axis_limits, variable_formats, lines, highlights.
+
+        ``legend`` (default 'above') and ``suppress_legends`` (default False) fall
+        back to the ``set_default_format`` defaults when not passed.
         """
         if figsize is None: figsize = self.figsize
+        legend = self._apply_default('legend', legend, 'above')
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
         self._clear_last_fig()
         if x is None: x = self.last_x
         if y is None: y = self.last_y
@@ -4809,8 +4914,8 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The bar Command
     # ------------------------------------------------------------------
-    def bar(self, x=None, y=None, markers=None, by='vars', barmode='group', agg='mean',
-            color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
+    def bar(self, x=None, y=None, markers=None, by='vars', barmode=None, agg=None,
+            color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None):
         """
         Unified interface for Bar Charts.
 
@@ -4818,11 +4923,18 @@ class UnichartNotebook:
         (mirroring `box`/`histogram`); the `by='sets'` and `by='dataset_x'`
         views color per dataset / per variable and ignore it.
 
+        `barmode` (default 'group'), `agg` (default 'mean') and `suppress_legends`
+        (default False) fall back to the `set_default_format` defaults when not passed.
+
         Marker overlay formatting is controlled via `var_format`. Examples:
             nb.var_format('EGT_LIMIT', color='red', marker='*', markersize=18)
             nb.bar(x='PHASE', y='EGT', markers='EGT_LIMIT')
         """
         if figsize is None: figsize = self.figsize
+        barmode = self._apply_default('barmode', barmode, 'group')
+        agg = self._apply_default('agg', agg, 'mean')
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        ncols, nrows = self._resolve_grid(ncols, nrows)
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -4892,12 +5004,20 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The box Command
     # ------------------------------------------------------------------
-    def box(self, x=None, y=None, by='vars', boxmode='group', points='outliers', notched=False,
-                color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
+    def box(self, x=None, y=None, by='vars', boxmode=None, points=None, notched=False,
+                color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None):
         """
         Unified interface for Box Plots.
+
+        `boxmode` (default 'group'), `points` (default 'outliers') and
+        `suppress_legends` (default False) fall back to the `set_default_format`
+        defaults when not passed.
         """
         if figsize is None: figsize = self.figsize
+        boxmode = self._apply_default('boxmode', boxmode, 'group')
+        points = self._apply_default('points', points, 'outliers')
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        ncols, nrows = self._resolve_grid(ncols, nrows)
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -4964,18 +5084,28 @@ class UnichartNotebook:
     # ------------------------------------------------------------------
     # The histogram Command
     # ------------------------------------------------------------------
-    def histogram(self, x=None, y=None, histfunc='sum', by='vars', nbins=None,
+    def histogram(self, x=None, y=None, histfunc=None, by='vars', nbins=None,
                     bin_size=None, bin_start=None, bin_end=None,
-                    histnorm='', barmode='overlay', alpha=0.7,
-                    color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False,
+                    histnorm=None, barmode=None, alpha=None,
+                    color=None, suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None,
                     opacity=None):
         """
         Unified interface for Histograms.
+
+        `histfunc` (default 'sum'), `histnorm` (default ''), `barmode`
+        (default 'overlay'), `alpha` (default 0.7) and `suppress_legends`
+        (default False) fall back to the `set_default_format` defaults when not passed.
         """
         if figsize is None: figsize = self.figsize
         if opacity is not None:
             warnings.warn("'opacity' is deprecated, use 'alpha'", DeprecationWarning, stacklevel=2)
             alpha = opacity
+        histfunc = self._apply_default('histfunc', histfunc, 'sum')
+        histnorm = self._apply_default('histnorm', histnorm, '')
+        barmode = self._apply_default('barmode', barmode, 'overlay')
+        alpha = self._apply_default('alpha', alpha, 0.7)
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        ncols, nrows = self._resolve_grid(ncols, nrows)
         self._clear_last_fig()
 
         if x is None: x = self.last_x
@@ -5021,7 +5151,7 @@ class UnichartNotebook:
     def contour(self, x=None, y=None, z=None, by='vars', contours_coloring='fill',
                     colorscale=None, interpolate=True, interp_res=100, interp_method='linear',
                     ncontours=None, overlay_sets=None,
-                    suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=False):
+                    suptitle=None, footer=None, figsize=None, ncols=None, nrows=None, suppress_legends=None):
         """
         Unified interface for Contour Plots.
 
@@ -5033,8 +5163,13 @@ class UnichartNotebook:
         size, linewidth and ``fill`` are all respected. The same overlay sets
         are drawn on every subplot (including ``by='sets'``, where each subplot
         is a different dataset). Defaults to ``None`` (no overlay).
+
+        ``suppress_legends`` (default False) falls back to the
+        ``set_default_format`` default when not passed.
         """
         if figsize is None: figsize = self.figsize
+        suppress_legends = self._apply_default('suppress_legends', suppress_legends, False)
+        ncols, nrows = self._resolve_grid(ncols, nrows)
         self._clear_last_fig()
 
         if x is None: x = self.last_x
